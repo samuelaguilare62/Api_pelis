@@ -1,0 +1,49 @@
+{
+  "project_info": {
+    "project_number": "624875251096",
+    "firebase_url": "https://phdt-b9b2c-default-rtdb.firebaseio.com",
+    "project_id": "phdt-b9b2c",
+    "storage_bucket": "phdt-b9b2c.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:624875251096:android:0d275bbd0f396f07e7f7ed",
+        "android_client_info": {
+          "package_name": "com.aaappps.funisgo"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCz2J_RB0NgKnciSJABNK00Xr9t0EG4IOk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:624875251096:android:cf6e5e0fde4820d6e7f7ed",
+        "android_client_info": {
+          "package_name": "com.samdev.funisgo"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCz2J_RB0NgKnciSJABNK00Xr9t0EG4IOk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
