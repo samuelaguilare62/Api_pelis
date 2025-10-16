@@ -5,38 +5,64 @@ from firebase_admin import credentials, firestore
 import os
 import secrets
 from functools import wraps
-from datetime import datetime, timedelta
 import time
 
 # Inicializar Flask
 app = Flask(__name__)
 CORS(app)
 
-# Configuración de Firebase - MÉTODO CON ARCHIVO JSON
+# Configuración de Firebase - SOLO VARIABLES DE ENTORNO
 def initialize_firebase():
     try:
-        # Método 1: Buscar archivo JSON en el repositorio
-        if os.path.exists('service-account-key.json'):
-            cred = credentials.Certificate('service-account-key.json')
-            firebase_admin.initialize_app(cred)
-            db = firestore.client()
-            print("✅ Firebase inicializado CON ARCHIVO JSON")
-            return db
+        print("🔄 Inicializando Firebase SOLO con variables de entorno...")
         
-        # Método 2: Application Default (fallback)
-        else:
-            print("⚠️  Archivo JSON no encontrado, usando Application Default")
-            cred = credentials.ApplicationDefault()
-            firebase_admin.initialize_app(cred, {
-                'projectId': 'phdt-b9b2c'
-            })
-            db = firestore.client()
-            print("✅ Firebase inicializado con Application Default")
+        # Verificar variables críticas primero
+        required_vars = ['FIREBASE_TYPE', 'FIREBASE_PROJECT_ID', 'FIREBASE_PRIVATE_KEY', 'FIREBASE_CLIENT_EMAIL']
+        missing_vars = []
+        
+        for var in required_vars:
+            if not os.environ.get(var):
+                missing_vars.append(var)
+        
+        if missing_vars:
+            print(f"❌ Variables de entorno faltantes: {missing_vars}")
+            print("💡 Configura estas variables en Render.com > Environment")
+            return None
+        
+        print("✅ Todas las variables de entorno están presentes")
+        
+        # Crear diccionario de credenciales SOLO con variables de entorno
+        service_account_info = {
+            "type": os.environ.get('FIREBASE_TYPE'),
+            "project_id": os.environ.get('FIREBASE_PROJECT_ID'),
+            "private_key_id": os.environ.get('FIREBASE_PRIVATE_KEY_ID'),
+            "private_key": os.environ.get('FIREBASE_PRIVATE_KEY', '').replace('\\n', '\n'),
+            "client_email": os.environ.get('FIREBASE_CLIENT_EMAIL'),
+            "client_id": os.environ.get('FIREBASE_CLIENT_ID'),
+            "auth_uri": os.environ.get('FIREBASE_AUTH_URI'),
+            "token_uri": os.environ.get('FIREBASE_TOKEN_URI'),
+            "auth_provider_x509_cert_url": os.environ.get('FIREBASE_AUTH_PROVIDER_CERT_URL'),
+            "client_x509_cert_url": os.environ.get('FIREBASE_CLIENT_CERT_URL')
+        }
+        
+        # Inicializar Firebase con las variables de entorno
+        cred = credentials.Certificate(service_account_info)
+        firebase_admin.initialize_app(cred)
+        db = firestore.client()
+        
+        # Probar conexión con una operación simple
+        try:
+            print("🔍 Probando conexión a Firestore...")
+            test_ref = db.collection('api_users').limit(1)
+            docs = list(test_ref.stream())
+            print(f"✅ Conexión exitosa. Documentos encontrados: {len(docs)}")
             return db
+        except Exception as e:
+            print(f"❌ Error en conexión a Firestore: {e}")
+            return None
             
     except Exception as e:
         print(f"❌ Error crítico inicializando Firebase: {e}")
-        print("📁 Archivos en directorio:", os.listdir('.'))
         return None
 
 # Inicializar Firebase
@@ -59,11 +85,7 @@ def check_firebase():
         return jsonify({
             "success": False,
             "error": "Firebase no inicializado",
-            "solution": [
-                "1. Agrega service-account-key.json al repositorio",
-                "2. Verifica que el proyecto Firebase exista",
-                "3. Revisa los permisos de Firestore"
-            ]
+            "solution": "Verifica las variables de entorno en Render.com"
         }), 500
     return None
 
@@ -215,16 +237,34 @@ def generate_unique_token():
 def diagnostic():
     """Endpoint de diagnóstico del sistema"""
     firebase_status = "✅ Conectado" if db else "❌ Desconectado"
-    files = os.listdir('.')
-    has_json = 'service-account-key.json' in files
+    
+    # Verificar variables de entorno críticas
+    env_vars = {
+        'FIREBASE_TYPE': "✅" if os.environ.get('FIREBASE_TYPE') else "❌",
+        'FIREBASE_PROJECT_ID': "✅" if os.environ.get('FIREBASE_PROJECT_ID') else "❌", 
+        'FIREBASE_PRIVATE_KEY': "✅" if os.environ.get('FIREBASE_PRIVATE_KEY') else "❌",
+        'FIREBASE_CLIENT_EMAIL': "✅" if os.environ.get('FIREBASE_CLIENT_EMAIL') else "❌"
+    }
+    
+    # Probar operación de Firestore si está conectado
+    firestore_test = "No probado"
+    if db:
+        try:
+            test_ref = db.collection('diagnostic_test').document('connection_test')
+            test_ref.set({'test': True, 'timestamp': firestore.SERVER_TIMESTAMP})
+            firestore_test = "✅ Escritura exitosa"
+            # Limpiar
+            test_ref.delete()
+        except Exception as e:
+            firestore_test = f"❌ Error: {str(e)}"
     
     return jsonify({
         "success": True,
         "system": {
             "firebase_status": firebase_status,
+            "firestore_test": firestore_test,
             "project_id": "phdt-b9b2c",
-            "files_in_directory": files,
-            "has_service_account": has_json
+            "environment_variables": env_vars
         },
         "endpoints_working": {
             "diagnostic": "✅ /api/diagnostic",
@@ -235,7 +275,6 @@ def diagnostic():
     })
 
 # Endpoints de administración (solo para admins)
-
 @app.route('/api/admin/create-user', methods=['POST'])
 @token_required
 def admin_create_user(user_data):
@@ -481,7 +520,6 @@ def admin_reset_limits(user_data):
         return jsonify({"error": str(e)}), 500
 
 # Endpoints para usuarios normales
-
 @app.route('/api/user/info', methods=['GET'])
 @token_required
 def get_user_info(user_data):
@@ -630,7 +668,6 @@ def home(user_data):
     })
 
 # Endpoints de contenido (todos requieren token)
-
 @app.route('/api/peliculas', methods=['GET'])
 @token_required
 def get_peliculas(user_data):
