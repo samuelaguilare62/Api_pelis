@@ -171,19 +171,23 @@ def check_usage_limits(user_data):
         print(f"Error verificando límites de uso: {e}")
         return {"error": f"Error interno verificando límites: {str(e)}"}, 500
 
-# Decorador para requerir autenticación
+# Decorador para requerir autenticación (ACTUALIZADO para aceptar parámetros URL)
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         token = None
         
-        # Verificar si el token está en el header
-        if 'Authorization' in request.headers:
+        # MÉTODO 1: Buscar token en parámetros URL (para navegador)
+        if request.args.get('token'):
+            token = request.args.get('token')
+        
+        # MÉTODO 2: Buscar token en headers Authorization (para apps/curl)
+        elif 'Authorization' in request.headers:
             auth_header = request.headers['Authorization']
             try:
                 token = auth_header.split(" ")[1]
             except IndexError:
-                return jsonify({"error": "Formato de token inválido. Use: Bearer {token}"}), 401
+                pass
         
         if not token:
             return jsonify({"error": "Token de acceso requerido"}), 401
