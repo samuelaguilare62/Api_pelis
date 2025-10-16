@@ -933,60 +933,62 @@ def get_user_info(user_data):
     if firebase_check:
         return firebase_check
     
-    # Para usuarios normales, obtener información actualizada
+    # Para usuarios normales, obtener información actualizada de Firestore
     if not user_data.get('is_admin'):
         try:
             user_ref = db.collection(TOKENS_COLLECTION).document(user_data['user_id'])
             user_doc = user_ref.get()
+            
             if user_doc.exists:
-                current_data = user_doc.to_dict()
-                user_data.update(current_data)
+                updated_data = user_doc.to_dict()
+                user_data.update(updated_data)
         except Exception as e:
-            print(f"Error obteniendo información actualizada: {e}")
+            print(f"Error actualizando datos de usuario: {e}")
     
-    # Calcular tiempo restante para resets
-    current_time = time.time()
-    daily_reset = user_data.get('daily_reset_timestamp', current_time)
-    session_start = user_data.get('session_start_timestamp', current_time)
-    
-    daily_remaining = max(0, 86400 - (current_time - daily_reset))
-    session_remaining = max(0, SESSION_TIMEOUT - (current_time - session_start))
-    
-    # Obtener información del plan
+    # Preparar respuesta con información del plan
     plan_type = user_data.get('plan_type', 'free')
-    plan_features = PLAN_CONFIG[plan_type]['features']
+    plan_config = PLAN_CONFIG[plan_type]
     
-    user_response = {
+    user_info = {
         "user_id": user_data.get('user_id'),
         "username": user_data.get('username'),
         "email": user_data.get('email'),
-        "active": user_data.get('active', True),
-        "is_admin": user_data.get('is_admin', False),
         "plan_type": plan_type,
+        "is_admin": user_data.get('is_admin', False),
+        "active": user_data.get('active', True),
         "created_at": user_data.get('created_at'),
-        "usage_stats": {
-            "total": user_data.get('total_usage_count', 0),
-            "daily": user_data.get('daily_usage_count', 0),
-            "session": user_data.get('session_usage_count', 0),
-            "daily_limit": user_data.get('max_requests_per_day', PLAN_CONFIG[plan_type]['daily_limit']),
-            "session_limit": user_data.get('max_requests_per_session', PLAN_CONFIG[plan_type]['session_limit']),
-            "daily_reset_in": f"{int(daily_remaining // 3600)}h {int((daily_remaining % 3600) // 60)}m",
-            "session_reset_in": f"{int(session_remaining // 60)}m {int(session_remaining % 60)}s"
+        "last_used": user_data.get('last_used'),
+        "usage": {
+            "daily": {
+                "current": user_data.get('daily_usage_count', 0),
+                "limit": plan_config['daily_limit'],
+                "percentage": min(100, int((user_data.get('daily_usage_count', 0) / plan_config['daily_limit']) * 100))
+            },
+            "session": {
+                "current": user_data.get('session_usage_count', 0),
+                "limit": plan_config['session_limit'],
+                "percentage": min(100, int((user_data.get('session_usage_count', 0) / plan_config['session_limit']) * 100))
+            },
+            "total": user_data.get('total_usage_count', 0)
         },
-        "features": plan_features
+        "features": plan_config['features'],
+        "rate_limits": {
+            "requests_per_minute": plan_config['rate_limit_per_minute'],
+            "concurrent_requests": plan_config['concurrent_requests']
+        }
     }
     
     return jsonify({
         "success": True,
-        "user": user_response
+        "user": user_info
     })
 
 @app.route('/api/user/regenerate-token', methods=['POST'])
 @token_required
 def regenerate_token(user_data):
-    """Generar un nuevo token para el usuario"""
+    """Regenerar token del usuario"""
     if user_data.get('is_admin'):
-        return jsonify({"error": "Los administradores no pueden regenerar tokens"}), 400
+        return jsonify({"error": "Los administradores no pueden regenerar tokens"}), 403
     
     firebase_check = check_firebase()
     if firebase_check:
@@ -994,8 +996,6 @@ def regenerate_token(user_data):
     
     try:
         user_id = user_data['user_id']
-        
-        # Generar nuevo token
         new_token = generate_unique_token()
         
         # Actualizar en Firestore
@@ -1015,122 +1015,7 @@ def regenerate_token(user_data):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Endpoint de comparación de planes
-@app.route('/api/plan-comparison', methods=['GET'])
-def plan_comparison():
-    """Mostrar comparación entre planes free y premium"""
-    comparison = {
-        'free': {
-            'name': 'Free',
-            'price': 'Gratuito',
-            'daily_requests': PLAN_CONFIG['free']['daily_limit'],
-            'session_requests': PLAN_CONFIG['free']['session_limit'],
-            'features': [
-                'Acceso a metadata básica',
-                'Búsqueda limitada (5 resultados)',
-                'Preview de contenido',
-                'Soporte comunitario',
-                'Límite de 50 películas visibles'
-            ],
-            'limitations': [
-                'No streaming de video',
-                'No descargas',
-                'No acceso a series',
-                'Búsquedas limitadas',
-                'Sin soporte prioritario'
-            ]
-        },
-        'premium': {
-            'name': 'Premium', 
-            'price': 'Personalizar',
-            'daily_requests': PLAN_CONFIG['premium']['daily_limit'],
-            'session_requests': PLAN_CONFIG['premium']['session_limit'],
-            'features': [
-                'Acceso completo al catálogo',
-                'Streaming HD ilimitado',
-                'Descargas disponibles',
-                'Búsquedas avanzadas (50 resultados)',
-                'Soporte prioritario 24/7',
-                'Acceso a series y contenido exclusivo',
-                'Operaciones masivas',
-                'Recomendaciones personalizadas'
-            ],
-            'limitations': [
-                'Uso comercial requiere licencia'
-            ]
-        }
-    }
-    
-    return jsonify({
-        "success": True,
-        "plans": comparison
-    })
-
-# Endpoint principal (requiere token)
-@app.route('/')
-@token_required
-def home(user_data):
-    """Endpoint principal con información de la API"""
-    firebase_check = check_firebase()
-    if firebase_check:
-        return firebase_check
-    
-    welcome_msg = "👋 ¡Bienvenido Administrador!" if user_data.get('is_admin') else "👋 ¡Bienvenido!"
-    
-    # Para usuarios normales, agregar información de límites
-    limits_info = None
-    if not user_data.get('is_admin'):
-        try:
-            user_ref = db.collection(TOKENS_COLLECTION).document(user_data['user_id'])
-            user_doc = user_ref.get()
-            if user_doc.exists:
-                current_data = user_doc.to_dict()
-                daily_usage = current_data.get('daily_usage_count', 0)
-                session_usage = current_data.get('session_usage_count', 0)
-                daily_limit = current_data.get('max_requests_per_day', PLAN_CONFIG['free']['daily_limit'])
-                session_limit = current_data.get('max_requests_per_session', PLAN_CONFIG['free']['session_limit'])
-                
-                limits_info = {
-                    "daily_usage": f"{daily_usage}/{daily_limit}",
-                    "session_usage": f"{session_usage}/{session_limit}",
-                    "remaining_daily": daily_limit - daily_usage,
-                    "remaining_session": session_limit - session_usage
-                }
-        except Exception as e:
-            print(f"Error obteniendo información de límites: {e}")
-    
-    return jsonify({
-        "message": f"🎬 API de Streaming - {welcome_msg}",
-        "version": "2.0.0",
-        "user": user_data.get('username'),
-        "plan_type": user_data.get('plan_type', 'free'),
-        "firebase_status": "✅ Conectado",
-        "usage_limits": limits_info,
-        "endpoints_available": {
-            "user_info": "GET /api/user/info",
-            "regenerate_token": "POST /api/user/regenerate-token",
-            "peliculas": "GET /api/peliculas",
-            "pelicula_especifica": "GET /api/peliculas/<id>",
-            "series": "GET /api/series", 
-            "serie_especifica": "GET /api/series/<id>",
-            "canales": "GET /api/canales",
-            "canal_especifico": "GET /api/canales/<id>",
-            "buscar": "GET /api/buscar?q=<termino>",
-            "estadisticas": "GET /api/estadisticas",
-            "stream": "GET /api/stream/<id> (solo premium)"
-        },
-        "admin_endpoints": {
-            "create_user": "POST /api/admin/create-user",
-            "list_users": "GET /api/admin/users",
-            "update_limits": "POST /api/admin/update-limits",
-            "reset_limits": "POST /api/admin/reset-limits",
-            "change_plan": "POST /api/admin/change-plan",
-            "usage_statistics": "GET /api/admin/usage-statistics"
-        } if user_data.get('is_admin') else None,
-        "instructions": "Incluya el token en el header: Authorization: Bearer {token}"
-    })
-
-# Endpoints de contenido (todos requieren token)
+# Endpoints de contenido REALES (sin datos de ejemplo)
 @app.route('/api/peliculas', methods=['GET'])
 @token_required
 def get_peliculas(user_data):
@@ -1456,7 +1341,7 @@ def get_estadisticas(user_data):
                     series_count += 1
         
         # Contar canales
-        canales_count = len(list(db.collection('canales').limit(1000).stream())
+        canales_count = len(list(db.collection('canales').limit(1000).stream()))
         
         return jsonify({
             "success": True,
@@ -1470,6 +1355,121 @@ def get_estadisticas(user_data):
         
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# Endpoint de comparación de planes
+@app.route('/api/plan-comparison', methods=['GET'])
+def plan_comparison():
+    """Mostrar comparación entre planes free y premium"""
+    comparison = {
+        'free': {
+            'name': 'Free',
+            'price': 'Gratuito',
+            'daily_requests': PLAN_CONFIG['free']['daily_limit'],
+            'session_requests': PLAN_CONFIG['free']['session_limit'],
+            'features': [
+                'Acceso a metadata básica',
+                'Búsqueda limitada (5 resultados)',
+                'Preview de contenido',
+                'Soporte comunitario',
+                'Límite de 50 películas visibles'
+            ],
+            'limitations': [
+                'No streaming de video',
+                'No descargas',
+                'No acceso a series',
+                'Búsquedas limitadas',
+                'Sin soporte prioritario'
+            ]
+        },
+        'premium': {
+            'name': 'Premium', 
+            'price': 'Personalizar',
+            'daily_requests': PLAN_CONFIG['premium']['daily_limit'],
+            'session_requests': PLAN_CONFIG['premium']['session_limit'],
+            'features': [
+                'Acceso completo al catálogo',
+                'Streaming HD ilimitado',
+                'Descargas disponibles',
+                'Búsquedas avanzadas (50 resultados)',
+                'Soporte prioritario 24/7',
+                'Acceso a series y contenido exclusivo',
+                'Operaciones masivas',
+                'Recomendaciones personalizadas'
+            ],
+            'limitations': [
+                'Uso comercial requiere licencia'
+            ]
+        }
+    }
+    
+    return jsonify({
+        "success": True,
+        "plans": comparison
+    })
+
+# Endpoint principal (requiere token)
+@app.route('/')
+@token_required
+def home(user_data):
+    """Endpoint principal con información de la API"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    welcome_msg = "👋 ¡Bienvenido Administrador!" if user_data.get('is_admin') else "👋 ¡Bienvenido!"
+    
+    # Para usuarios normales, agregar información de límites
+    limits_info = None
+    if not user_data.get('is_admin'):
+        try:
+            user_ref = db.collection(TOKENS_COLLECTION).document(user_data['user_id'])
+            user_doc = user_ref.get()
+            if user_doc.exists:
+                current_data = user_doc.to_dict()
+                daily_usage = current_data.get('daily_usage_count', 0)
+                session_usage = current_data.get('session_usage_count', 0)
+                daily_limit = current_data.get('max_requests_per_day', PLAN_CONFIG['free']['daily_limit'])
+                session_limit = current_data.get('max_requests_per_session', PLAN_CONFIG['free']['session_limit'])
+                
+                limits_info = {
+                    "daily_usage": f"{daily_usage}/{daily_limit}",
+                    "session_usage": f"{session_usage}/{session_limit}",
+                    "remaining_daily": daily_limit - daily_usage,
+                    "remaining_session": session_limit - session_usage
+                }
+        except Exception as e:
+            print(f"Error obteniendo información de límites: {e}")
+    
+    return jsonify({
+        "message": f"🎬 API de Streaming - {welcome_msg}",
+        "version": "2.0.0",
+        "user": user_data.get('username'),
+        "plan_type": user_data.get('plan_type', 'free'),
+        "firebase_status": "✅ Conectado",
+        "usage_limits": limits_info,
+        "endpoints_available": {
+            "user_info": "GET /api/user/info",
+            "regenerate_token": "POST /api/user/regenerate-token",
+            "peliculas": "GET /api/peliculas",
+            "pelicula_especifica": "GET /api/peliculas/<id>",
+            "series": "GET /api/series", 
+            "serie_especifica": "GET /api/series/<id>",
+            "canales": "GET /api/canales",
+            "canal_especifico": "GET /api/canales/<id>",
+            "buscar": "GET /api/buscar?q=<termino>",
+            "estadisticas": "GET /api/estadisticas",
+            "stream": "GET /api/stream/<id> (solo premium)"
+        },
+        "admin_endpoints": {
+            "create_user": "POST /api/admin/create-user",
+            "list_users": "GET /api/admin/users",
+            "update_limits": "POST /api/admin/update-limits",
+            "reset_limits": "POST /api/admin/reset-limits",
+            "change_plan": "POST /api/admin/change-plan",
+            "usage_statistics": "GET /api/admin/usage-statistics"
+        } if user_data.get('is_admin') else None,
+        "instructions": "Incluya el token en el header: Authorization: Bearer {token}"
+    })
 
 # Manejo de errores
 @app.errorhandler(404)
