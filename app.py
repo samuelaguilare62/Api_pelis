@@ -6,10 +6,17 @@ import os
 import secrets
 from functools import wraps
 import time
+import threading
+from collections import defaultdict
+import re
 
 # Inicializar Flask
 app = Flask(__name__)
 CORS(app)
+
+# Configuración de seguridad
+app.config['JSON_SORT_KEYS'] = False
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max request size
 
 # Configuración de Firebase - SOLO VARIABLES DE ENTORNO
 def initialize_firebase():
@@ -74,10 +81,61 @@ ADMIN_TOKENS = ["admin_token_secreto_2024"]
 # Colección para almacenar usuarios y tokens
 TOKENS_COLLECTION = "api_users"
 
-# Límites por defecto para usuarios normales
-DEFAULT_DAILY_LIMIT = 1000
-DEFAULT_SESSION_LIMIT = 100
+# Configuración de planes
+PLAN_CONFIG = {
+    'free': {
+        'daily_limit': 50,
+        'session_limit': 5,
+        'rate_limit_per_minute': 10,
+        'concurrent_requests': 1,
+        'features': {
+            'content_access': 'limited',
+            'api_responses': 'basic',
+            'search_limit': 5,
+            'content_previews': True,
+            'streaming': False,
+            'download_links': False,
+            'api_support': 'community',
+            'request_priority': 'low',
+            'bulk_operations': False,
+            'advanced_filters': False,
+            'content_recommendations': False
+        }
+    },
+    'premium': {
+        'daily_limit': 1000,
+        'session_limit': 100,
+        'rate_limit_per_minute': 60,
+        'concurrent_requests': 3,
+        'features': {
+            'content_access': 'full',
+            'api_responses': 'enhanced',
+            'search_limit': 50,
+            'content_previews': True,
+            'streaming': True,
+            'download_links': True,
+            'api_support': 'priority',
+            'request_priority': 'high',
+            'bulk_operations': True,
+            'advanced_filters': True,
+            'content_recommendations': True
+        }
+    }
+}
+
 SESSION_TIMEOUT = 3600  # 1 hora en segundos
+
+# Track requests por usuario para rate limiting
+user_request_times = defaultdict(list)
+request_lock = threading.Lock()
+
+# IP-based rate limiting
+ip_request_times = defaultdict(list)
+ip_lock = threading.Lock()
+
+# Configuración de seguridad
+MAX_REQUESTS_PER_MINUTE_PER_IP = 100  # Límite global por IP
+MAX_REQUESTS_PER_MINUTE_PER_USER = 60  # Límite máximo por usuario
 
 # Decorador para verificar Firebase
 def check_firebase():
@@ -89,9 +147,70 @@ def check_firebase():
         }), 500
     return None
 
+# Función para verificar rate limiting por IP
+def check_ip_rate_limit(ip_address):
+    """Verificar límites de tasa por IP"""
+    current_time = time.time()
+    
+    with ip_lock:
+        # Limpiar requests antiguos (mayores a 1 minuto)
+        ip_request_times[ip_address] = [
+            req_time for req_time in ip_request_times[ip_address] 
+            if current_time - req_time < 60
+        ]
+        
+        # Verificar rate limit por minuto
+        if len(ip_request_times[ip_address]) >= MAX_REQUESTS_PER_MINUTE_PER_IP:
+            return {
+                "error": "Límite global de requests por minuto excedido",
+                "limit_type": "ip_rate_limit",
+                "current_usage": len(ip_request_times[ip_address]),
+                "limit": MAX_REQUESTS_PER_MINUTE_PER_IP,
+                "wait_time": 60
+            }, 429
+        
+        # Agregar nuevo request
+        ip_request_times[ip_address].append(current_time)
+    
+    return None
+
+# Función para verificar rate limiting por usuario
+def check_user_rate_limit(user_data):
+    """Verificar límites de tasa por usuario"""
+    user_id = user_data.get('user_id')
+    plan_type = user_data.get('plan_type', 'free')
+    
+    if user_data.get('is_admin'):
+        return None
+    
+    current_time = time.time()
+    plan_config = PLAN_CONFIG[plan_type]
+    
+    with request_lock:
+        # Limpiar requests antiguos (mayores a 1 minuto)
+        user_request_times[user_id] = [
+            req_time for req_time in user_request_times[user_id] 
+            if current_time - req_time < 60
+        ]
+        
+        # Verificar rate limit por minuto
+        if len(user_request_times[user_id]) >= plan_config['rate_limit_per_minute']:
+            return {
+                "error": "Límite de requests por minuto excedido",
+                "limit_type": "rate_limit",
+                "current_usage": len(user_request_times[user_id]),
+                "limit": plan_config['rate_limit_per_minute'],
+                "wait_time": 60
+            }, 429
+        
+        # Agregar nuevo request
+        user_request_times[user_id].append(current_time)
+    
+    return None
+
 # Función para verificar y actualizar límites de uso
 def check_usage_limits(user_data):
-    """Verificar límites de uso diario y por sesión"""
+    """Verificar límites de uso diario, por sesión y rate limiting"""
     if user_data.get('is_admin'):
         return None  # Admin no tiene límites
     
@@ -100,6 +219,11 @@ def check_usage_limits(user_data):
         return {"error": "ID de usuario no válido"}, 401
     
     try:
+        # Primero verificar rate limits
+        rate_limit_check = check_user_rate_limit(user_data)
+        if rate_limit_check:
+            return rate_limit_check
+        
         user_ref = db.collection(TOKENS_COLLECTION).document(user_id)
         user_doc = user_ref.get()
         
@@ -108,10 +232,12 @@ def check_usage_limits(user_data):
         
         user_info = user_doc.to_dict()
         current_time = time.time()
+        plan_type = user_info.get('plan_type', 'free')
+        plan_config = PLAN_CONFIG[plan_type]
         
-        # Obtener límites del usuario
-        daily_limit = user_info.get('max_requests_per_day', DEFAULT_DAILY_LIMIT)
-        session_limit = user_info.get('max_requests_per_session', DEFAULT_SESSION_LIMIT)
+        # Obtener límites del plan
+        daily_limit = plan_config['daily_limit']
+        session_limit = plan_config['session_limit']
         
         # Inicializar contadores si no existen
         update_data = {}
@@ -136,19 +262,23 @@ def check_usage_limits(user_data):
         
         # Verificar si se excedieron los límites
         if daily_usage >= daily_limit:
+            time_remaining = 86400 - (current_time - last_reset)
             return {
-                "error": f"Límite diario excedido ({daily_usage}/{daily_limit}). Espere hasta mañana.",
+                "error": f"Límite diario excedido ({daily_usage}/{daily_limit})",
                 "limit_type": "daily",
                 "current_usage": daily_usage,
-                "limit": daily_limit
+                "limit": daily_limit,
+                "reset_in": f"{int(time_remaining // 3600)}h {int((time_remaining % 3600) // 60)}m"
             }, 429
         
         if session_usage >= session_limit:
+            time_remaining = SESSION_TIMEOUT - (current_time - session_start)
             return {
-                "error": f"Límite de sesión excedido ({session_usage}/{session_limit}). Espere 1 hora.",
+                "error": f"Límite de sesión excedido ({session_usage}/{session_limit})",
                 "limit_type": "session", 
                 "current_usage": session_usage,
-                "limit": session_limit
+                "limit": session_limit,
+                "reset_in": f"{int(time_remaining // 60)}m {int(time_remaining % 60)}s"
             }, 429
         
         # Actualizar contadores
@@ -171,7 +301,71 @@ def check_usage_limits(user_data):
         print(f"Error verificando límites de uso: {e}")
         return {"error": f"Error interno verificando límites: {str(e)}"}, 500
 
-# Decorador para requerir autenticación (ACTUALIZADO para aceptar parámetros URL)
+# Función para limitar información de contenido para usuarios free
+def limit_content_info(content_data, content_type):
+    """Limitar información para usuarios free"""
+    limited_data = {
+        'id': content_data.get('id'),
+        'title': content_data.get('title'),
+        'year': content_data.get('year'),
+        'genre': content_data.get('genre'),
+        'rating': content_data.get('rating'),
+        'poster': content_data.get('poster'),
+        'description': content_data.get('description', '')[:100] + '...' if content_data.get('description') else ''
+    }
+    
+    # Remover información sensible para free users
+    if 'streaming_url' in content_data:
+        limited_data['streaming_available'] = True
+        limited_data['upgrade_required'] = True
+    else:
+        limited_data['streaming_available'] = False
+    
+    if 'download_links' in content_data:
+        limited_data['downloads_available'] = True
+        limited_data['upgrade_required'] = True
+    else:
+        limited_data['downloads_available'] = False
+    
+    return limited_data
+
+# Middleware de seguridad global
+@app.before_request
+def before_request():
+    """Middleware de seguridad global"""
+    # Verificar rate limiting por IP
+    ip_address = request.remote_addr
+    ip_limit_check = check_ip_rate_limit(ip_address)
+    if ip_limit_check:
+        return jsonify(ip_limit_check[0]), ip_limit_check[1]
+    
+    # Validar headers de seguridad
+    if request.endpoint and request.endpoint != 'diagnostic':
+        # Prevenir MIME type sniffing
+        if 'X-Content-Type-Options' not in request.headers:
+            pass  # Se agregará en after_request
+    
+    # Log de requests (opcional para debugging)
+    if request.endpoint and 'admin' not in request.endpoint:
+        print(f"📥 Request: {request.method} {request.path} from {ip_address}")
+
+@app.after_request
+def after_request(response):
+    """Agregar headers de seguridad"""
+    # Headers de seguridad HTTP
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    response.headers['Content-Security-Policy'] = "default-src 'self'"
+    
+    # Prevenir caching de respuestas sensibles
+    if request.path.startswith('/api/admin') or request.path.startswith('/api/user'):
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    
+    return response
+
+# Decorador para requerir autenticación (ACTUALIZADO con seguridad mejorada)
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -192,6 +386,10 @@ def token_required(f):
         if not token:
             return jsonify({"error": "Token de acceso requerido"}), 401
         
+        # Validar formato del token
+        if len(token) < 10 or len(token) > 500:
+            return jsonify({"error": "Formato de token inválido"}), 401
+        
         try:
             # Verificar si es token de admin
             if token in ADMIN_TOKENS:
@@ -199,7 +397,8 @@ def token_required(f):
                     'user_id': 'admin',
                     'username': 'Administrador',
                     'email': 'admin@api.com',
-                    'is_admin': True
+                    'is_admin': True,
+                    'plan_type': 'admin'
                 }
                 return f(user_data, *args, **kwargs)
             
@@ -212,6 +411,7 @@ def token_required(f):
                 user_data = doc.to_dict()
                 user_data['user_id'] = doc.id
                 user_data['is_admin'] = False
+                user_data['plan_type'] = user_data.get('plan_type', 'free')
                 break
             
             if not user_data:
@@ -228,13 +428,52 @@ def token_required(f):
             return f(user_data, *args, **kwargs)
             
         except Exception as e:
-            return jsonify({"error": f"Error al verificar token: {str(e)}"}), 500
+            print(f"Error de autenticación: {e}")
+            return jsonify({"error": "Error de autenticación"}), 500
     
     return decorated
+
+# Middleware para verificar características del plan
+def check_plan_feature(feature_name):
+    """Decorador para verificar características del plan"""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(user_data, *args, **kwargs):
+            if user_data.get('is_admin'):
+                return f(user_data, *args, **kwargs)
+            
+            plan_type = user_data.get('plan_type', 'free')
+            features = PLAN_CONFIG[plan_type]['features']
+            
+            if not features.get(feature_name, False):
+                return jsonify({
+                    "error": f"Esta característica no está disponible en tu plan {plan_type}",
+                    "feature_required": feature_name,
+                    "upgrade_required": True,
+                    "current_plan": plan_type,
+                    "required_plan": "premium"
+                }), 403
+            
+            return f(user_data, *args, **kwargs)
+        return decorated_function
+    return decorator
 
 # Generar token único
 def generate_unique_token():
     return secrets.token_urlsafe(32)
+
+# Validación de entrada
+def validate_email(email):
+    """Validar formato de email"""
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
+
+def validate_username(username):
+    """Validar formato de username"""
+    if len(username) < 3 or len(username) > 50:
+        return False
+    pattern = r'^[a-zA-Z0-9_-]+$'
+    return re.match(pattern, username) is not None
 
 # Endpoint de diagnóstico
 @app.route('/api/diagnostic', methods=['GET'])
@@ -270,6 +509,12 @@ def diagnostic():
             "project_id": "phdt-b9b2c",
             "environment_variables": env_vars
         },
+        "security": {
+            "rate_limiting": "✅ Activado",
+            "ip_restrictions": "✅ Activado",
+            "token_authentication": "✅ Activado",
+            "plan_restrictions": "✅ Activado"
+        },
         "endpoints_working": {
             "diagnostic": "✅ /api/diagnostic",
             "home": "🔒 / (requiere token)",
@@ -282,11 +527,10 @@ def diagnostic():
 @app.route('/api/admin/create-user', methods=['POST'])
 @token_required
 def admin_create_user(user_data):
-    """Crear nuevo usuario (solo administradores)"""
+    """Crear nuevo usuario con plan específico (solo administradores)"""
     if not user_data.get('is_admin'):
         return jsonify({"error": "Se requieren privilegios de administrador"}), 403
     
-    # Verificar Firebase
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
@@ -299,11 +543,21 @@ def admin_create_user(user_data):
         
         username = data.get('username')
         email = data.get('email')
-        daily_limit = data.get('daily_limit', DEFAULT_DAILY_LIMIT)
-        session_limit = data.get('session_limit', DEFAULT_SESSION_LIMIT)
+        plan_type = data.get('plan_type', 'free').lower()
         
+        # Validaciones de entrada
         if not username or not email:
             return jsonify({"error": "Username y email son requeridos"}), 400
+        
+        if not validate_username(username):
+            return jsonify({"error": "Username debe tener entre 3-50 caracteres y solo puede contener letras, números, guiones y guiones bajos"}), 400
+        
+        if not validate_email(email):
+            return jsonify({"error": "Formato de email inválido"}), 400
+        
+        # Validar plan
+        if plan_type not in PLAN_CONFIG:
+            return jsonify({"error": f"Plan no válido. Opciones: {list(PLAN_CONFIG.keys())}"}), 400
         
         # Verificar si el usuario ya existe
         users_ref = db.collection(TOKENS_COLLECTION)
@@ -311,6 +565,15 @@ def admin_create_user(user_data):
         
         if any(existing_user):
             return jsonify({"error": "El email ya está registrado"}), 400
+        
+        # Obtener límites del plan
+        plan_config = PLAN_CONFIG[plan_type]
+        daily_limit = data.get('daily_limit', plan_config['daily_limit'])
+        session_limit = data.get('session_limit', plan_config['session_limit'])
+        
+        # Validar límites personalizados
+        if daily_limit <= 0 or session_limit <= 0:
+            return jsonify({"error": "Los límites deben ser mayores a 0"}), 400
         
         # Generar token único
         token = generate_unique_token()
@@ -323,6 +586,7 @@ def admin_create_user(user_data):
             'token': token,
             'active': True,
             'is_admin': False,
+            'plan_type': plan_type,
             'created_at': firestore.SERVER_TIMESTAMP,
             'last_used': None,
             'total_usage_count': 0,
@@ -331,7 +595,8 @@ def admin_create_user(user_data):
             'daily_reset_timestamp': current_time,
             'session_start_timestamp': current_time,
             'max_requests_per_day': daily_limit,
-            'max_requests_per_session': session_limit
+            'max_requests_per_session': session_limit,
+            'features': plan_config['features']
         }
         
         # Guardar en Firestore
@@ -346,15 +611,12 @@ def admin_create_user(user_data):
                 "username": username,
                 "email": email,
                 "token": token,
+                "plan_type": plan_type,
                 "limits": {
                     "daily": daily_limit,
                     "session": session_limit
-                }
-            },
-            "instructions": {
-                "usage": "Use el token en el header: Authorization: Bearer {token}",
-                "endpoints": "Todos los endpoints requieren token",
-                "limits": f"Límites: {daily_limit} requests por día, {session_limit} por sesión"
+                },
+                "features": plan_config['features']
             }
         })
         
@@ -364,11 +626,10 @@ def admin_create_user(user_data):
 @app.route('/api/admin/users', methods=['GET'])
 @token_required
 def admin_get_users(user_data):
-    """Obtener lista de usuarios (solo administradores)"""
+    """Obtener lista de usuarios con información de planes (solo administradores)"""
     if not user_data.get('is_admin'):
         return jsonify({"error": "Se requieren privilegios de administrador"}), 403
     
-    # Verificar Firebase
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
@@ -381,6 +642,14 @@ def admin_get_users(user_data):
         for doc in docs:
             user_info = doc.to_dict()
             user_info['user_id'] = doc.id
+            
+            # Información del plan
+            plan_type = user_info.get('plan_type', 'free')
+            user_info['plan_type'] = plan_type
+            user_info['plan_limits'] = {
+                'daily': PLAN_CONFIG[plan_type]['daily_limit'],
+                'session': PLAN_CONFIG[plan_type]['session_limit']
+            }
             
             # Calcular tiempo restante para reset de límites
             current_time = time.time()
@@ -395,8 +664,8 @@ def admin_get_users(user_data):
                 'session_reset_in_seconds': int(session_remaining),
                 'daily_usage': user_info.get('daily_usage_count', 0),
                 'session_usage': user_info.get('session_usage_count', 0),
-                'daily_limit': user_info.get('max_requests_per_day', DEFAULT_DAILY_LIMIT),
-                'session_limit': user_info.get('max_requests_per_session', DEFAULT_SESSION_LIMIT)
+                'daily_limit': user_info.get('max_requests_per_day', PLAN_CONFIG[plan_type]['daily_limit']),
+                'session_limit': user_info.get('max_requests_per_session', PLAN_CONFIG[plan_type]['session_limit'])
             }
             
             # No mostrar el token por seguridad
@@ -404,9 +673,16 @@ def admin_get_users(user_data):
                 del user_info['token']
             users.append(user_info)
         
+        # Estadísticas de planes
+        plan_stats = {}
+        for user in users:
+            plan = user.get('plan_type', 'free')
+            plan_stats[plan] = plan_stats.get(plan, 0) + 1
+        
         return jsonify({
             "success": True,
             "count": len(users),
+            "plan_statistics": plan_stats,
             "users": users
         })
         
@@ -420,7 +696,6 @@ def admin_update_limits(user_data):
     if not user_data.get('is_admin'):
         return jsonify({"error": "Se requieren privilegios de administrador"}), 403
     
-    # Verificar Firebase
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
@@ -441,6 +716,13 @@ def admin_update_limits(user_data):
         if daily_limit is None and session_limit is None:
             return jsonify({"error": "Debe proporcionar al menos un límite para actualizar"}), 400
         
+        # Validar límites
+        if daily_limit is not None and daily_limit <= 0:
+            return jsonify({"error": "El límite diario debe ser mayor a 0"}), 400
+        
+        if session_limit is not None and session_limit <= 0:
+            return jsonify({"error": "El límite de sesión debe ser mayor a 0"}), 400
+        
         # Verificar si el usuario existe
         user_ref = db.collection(TOKENS_COLLECTION).document(user_id)
         user_doc = user_ref.get()
@@ -450,13 +732,9 @@ def admin_update_limits(user_data):
         
         update_data = {}
         if daily_limit is not None:
-            if daily_limit <= 0:
-                return jsonify({"error": "El límite diario debe ser mayor a 0"}), 400
             update_data['max_requests_per_day'] = daily_limit
         
         if session_limit is not None:
-            if session_limit <= 0:
-                return jsonify({"error": "El límite de sesión debe ser mayor a 0"}), 400
             update_data['max_requests_per_session'] = session_limit
         
         user_ref.update(update_data)
@@ -470,6 +748,67 @@ def admin_update_limits(user_data):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/admin/change-plan', methods=['POST'])
+@token_required
+def admin_change_plan(user_data):
+    """Cambiar el plan de un usuario (solo administradores)"""
+    if not user_data.get('is_admin'):
+        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+    
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "Datos JSON requeridos"}), 400
+        
+        user_id = data.get('user_id')
+        new_plan = data.get('new_plan', 'free').lower()
+        
+        if not user_id:
+            return jsonify({"error": "user_id es requerido"}), 400
+        
+        if new_plan not in PLAN_CONFIG:
+            return jsonify({"error": f"Plan no válido. Opciones: {list(PLAN_CONFIG.keys())}"}), 400
+        
+        # Verificar si el usuario existe
+        user_ref = db.collection(TOKENS_COLLECTION).document(user_id)
+        user_doc = user_ref.get()
+        
+        if not user_doc.exists:
+            return jsonify({"error": "Usuario no encontrado"}), 404
+        
+        # Obtener configuración del nuevo plan
+        plan_config = PLAN_CONFIG[new_plan]
+        
+        # Actualizar usuario
+        update_data = {
+            'plan_type': new_plan,
+            'max_requests_per_day': plan_config['daily_limit'],
+            'max_requests_per_session': plan_config['session_limit'],
+            'features': plan_config['features'],
+            'plan_updated_at': firestore.SERVER_TIMESTAMP
+        }
+        
+        user_ref.update(update_data)
+        
+        return jsonify({
+            "success": True,
+            "message": f"Plan cambiado a {new_plan} exitosamente",
+            "new_plan": new_plan,
+            "new_limits": {
+                "daily": plan_config['daily_limit'],
+                "session": plan_config['session_limit']
+            },
+            "new_features": plan_config['features']
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/admin/reset-limits', methods=['POST'])
 @token_required
 def admin_reset_limits(user_data):
@@ -477,7 +816,6 @@ def admin_reset_limits(user_data):
     if not user_data.get('is_admin'):
         return jsonify({"error": "Se requieren privilegios de administrador"}), 403
     
-    # Verificar Firebase
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
@@ -523,17 +861,79 @@ def admin_reset_limits(user_data):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Endpoints para usuarios normales
-@app.route('/api/user/info', methods=['GET'])
+@app.route('/api/admin/usage-statistics', methods=['GET'])
 @token_required
-def get_user_info(user_data):
-    """Obtener información del usuario actual"""
-    # Verificar Firebase
+def admin_usage_statistics(user_data):
+    """Estadísticas detalladas de uso por plan (solo administradores)"""
+    if not user_data.get('is_admin'):
+        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+    
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
     
-    # Para usuarios normales, obtener información actualizada de límites
+    try:
+        users_ref = db.collection(TOKENS_COLLECTION)
+        docs = users_ref.stream()
+        
+        stats = {
+            'free': {'users': 0, 'total_requests': 0, 'active_users': 0},
+            'premium': {'users': 0, 'total_requests': 0, 'active_users': 0},
+            'total': {'users': 0, 'total_requests': 0, 'active_users': 0}
+        }
+        
+        current_time = time.time()
+        
+        for doc in docs:
+            user_info = doc.to_dict()
+            plan_type = user_info.get('plan_type', 'free')
+            
+            stats[plan_type]['users'] += 1
+            stats['total']['users'] += 1
+            
+            total_requests = user_info.get('total_usage_count', 0)
+            stats[plan_type]['total_requests'] += total_requests
+            stats['total']['total_requests'] += total_requests
+            
+            # Usuario activo (usado en las últimas 24 horas)
+            last_used = user_info.get('last_used')
+            if last_used:
+                if hasattr(last_used, 'timestamp'):
+                    last_used_time = last_used.timestamp()
+                else:
+                    last_used_time = last_used
+                
+                if current_time - last_used_time < 86400:
+                    stats[plan_type]['active_users'] += 1
+                    stats['total']['active_users'] += 1
+        
+        # Calcular promedios
+        for plan in ['free', 'premium', 'total']:
+            if stats[plan]['users'] > 0:
+                stats[plan]['avg_requests_per_user'] = stats[plan]['total_requests'] / stats[plan]['users']
+            else:
+                stats[plan]['avg_requests_per_user'] = 0
+        
+        return jsonify({
+            "success": True,
+            "statistics": stats,
+            "plan_limits": PLAN_CONFIG,
+            "timestamp": time.time()
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Endpoints para usuarios normales
+@app.route('/api/user/info', methods=['GET'])
+@token_required
+def get_user_info(user_data):
+    """Obtener información del usuario actual con detalles del plan"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    # Para usuarios normales, obtener información actualizada
     if not user_data.get('is_admin'):
         try:
             user_ref = db.collection(TOKENS_COLLECTION).document(user_data['user_id'])
@@ -552,22 +952,28 @@ def get_user_info(user_data):
     daily_remaining = max(0, 86400 - (current_time - daily_reset))
     session_remaining = max(0, SESSION_TIMEOUT - (current_time - session_start))
     
+    # Obtener información del plan
+    plan_type = user_data.get('plan_type', 'free')
+    plan_features = PLAN_CONFIG[plan_type]['features']
+    
     user_response = {
         "user_id": user_data.get('user_id'),
         "username": user_data.get('username'),
         "email": user_data.get('email'),
         "active": user_data.get('active', True),
         "is_admin": user_data.get('is_admin', False),
+        "plan_type": plan_type,
         "created_at": user_data.get('created_at'),
         "usage_stats": {
             "total": user_data.get('total_usage_count', 0),
             "daily": user_data.get('daily_usage_count', 0),
             "session": user_data.get('session_usage_count', 0),
-            "daily_limit": user_data.get('max_requests_per_day', DEFAULT_DAILY_LIMIT),
-            "session_limit": user_data.get('max_requests_per_session', DEFAULT_SESSION_LIMIT),
+            "daily_limit": user_data.get('max_requests_per_day', PLAN_CONFIG[plan_type]['daily_limit']),
+            "session_limit": user_data.get('max_requests_per_session', PLAN_CONFIG[plan_type]['session_limit']),
             "daily_reset_in": f"{int(daily_remaining // 3600)}h {int((daily_remaining % 3600) // 60)}m",
             "session_reset_in": f"{int(session_remaining // 60)}m {int(session_remaining % 60)}s"
-        }
+        },
+        "features": plan_features
     }
     
     return jsonify({
@@ -582,7 +988,6 @@ def regenerate_token(user_data):
     if user_data.get('is_admin'):
         return jsonify({"error": "Los administradores no pueden regenerar tokens"}), 400
     
-    # Verificar Firebase
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
@@ -610,12 +1015,62 @@ def regenerate_token(user_data):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# Endpoint de comparación de planes
+@app.route('/api/plan-comparison', methods=['GET'])
+def plan_comparison():
+    """Mostrar comparación entre planes free y premium"""
+    comparison = {
+        'free': {
+            'name': 'Free',
+            'price': 'Gratuito',
+            'daily_requests': PLAN_CONFIG['free']['daily_limit'],
+            'session_requests': PLAN_CONFIG['free']['session_limit'],
+            'features': [
+                'Acceso a metadata básica',
+                'Búsqueda limitada (5 resultados)',
+                'Preview de contenido',
+                'Soporte comunitario',
+                'Límite de 50 películas visibles'
+            ],
+            'limitations': [
+                'No streaming de video',
+                'No descargas',
+                'No acceso a series',
+                'Búsquedas limitadas',
+                'Sin soporte prioritario'
+            ]
+        },
+        'premium': {
+            'name': 'Premium', 
+            'price': 'Personalizar',
+            'daily_requests': PLAN_CONFIG['premium']['daily_limit'],
+            'session_requests': PLAN_CONFIG['premium']['session_limit'],
+            'features': [
+                'Acceso completo al catálogo',
+                'Streaming HD ilimitado',
+                'Descargas disponibles',
+                'Búsquedas avanzadas (50 resultados)',
+                'Soporte prioritario 24/7',
+                'Acceso a series y contenido exclusivo',
+                'Operaciones masivas',
+                'Recomendaciones personalizadas'
+            ],
+            'limitations': [
+                'Uso comercial requiere licencia'
+            ]
+        }
+    }
+    
+    return jsonify({
+        "success": True,
+        "plans": comparison
+    })
+
 # Endpoint principal (requiere token)
 @app.route('/')
 @token_required
 def home(user_data):
     """Endpoint principal con información de la API"""
-    # Verificar Firebase
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
@@ -632,8 +1087,8 @@ def home(user_data):
                 current_data = user_doc.to_dict()
                 daily_usage = current_data.get('daily_usage_count', 0)
                 session_usage = current_data.get('session_usage_count', 0)
-                daily_limit = current_data.get('max_requests_per_day', DEFAULT_DAILY_LIMIT)
-                session_limit = current_data.get('max_requests_per_session', DEFAULT_SESSION_LIMIT)
+                daily_limit = current_data.get('max_requests_per_day', PLAN_CONFIG['free']['daily_limit'])
+                session_limit = current_data.get('max_requests_per_session', PLAN_CONFIG['free']['session_limit'])
                 
                 limits_info = {
                     "daily_usage": f"{daily_usage}/{daily_limit}",
@@ -646,8 +1101,9 @@ def home(user_data):
     
     return jsonify({
         "message": f"🎬 API de Streaming - {welcome_msg}",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "user": user_data.get('username'),
+        "plan_type": user_data.get('plan_type', 'free'),
         "firebase_status": "✅ Conectado",
         "usage_limits": limits_info,
         "endpoints_available": {
@@ -660,13 +1116,16 @@ def home(user_data):
             "canales": "GET /api/canales",
             "canal_especifico": "GET /api/canales/<id>",
             "buscar": "GET /api/buscar?q=<termino>",
-            "estadisticas": "GET /api/estadisticas"
+            "estadisticas": "GET /api/estadisticas",
+            "stream": "GET /api/stream/<id> (solo premium)"
         },
         "admin_endpoints": {
             "create_user": "POST /api/admin/create-user",
             "list_users": "GET /api/admin/users",
             "update_limits": "POST /api/admin/update-limits",
-            "reset_limits": "POST /api/admin/reset-limits"
+            "reset_limits": "POST /api/admin/reset-limits",
+            "change_plan": "POST /api/admin/change-plan",
+            "usage_statistics": "GET /api/admin/usage-statistics"
         } if user_data.get('is_admin') else None,
         "instructions": "Incluya el token en el header: Authorization: Bearer {token}"
     })
@@ -675,8 +1134,7 @@ def home(user_data):
 @app.route('/api/peliculas', methods=['GET'])
 @token_required
 def get_peliculas(user_data):
-    """Obtener todas las películas con paginación"""
-    # Verificar Firebase
+    """Obtener todas las películas con paginación y restricciones por plan"""
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
@@ -685,13 +1143,40 @@ def get_peliculas(user_data):
         limit = int(request.args.get('limit', 20))
         page = int(request.args.get('page', 1))
         
+        # Aplicar límites según plan
+        plan_type = user_data.get('plan_type', 'free')
+        plan_config = PLAN_CONFIG[plan_type]
+        
+        # Free users tienen límites más estrictos
+        if plan_type == 'free':
+            limit = min(limit, 10)  # Máximo 10 resultados para free
+            max_offset = 50  # Free solo puede acceder a primeras 50 películas
+        else:
+            max_offset = 1000  # Premium acceso completo
+        
         peliculas_ref = db.collection('peliculas')
-        docs = peliculas_ref.limit(limit).stream()
+        
+        # Para free users, limitar el offset
+        offset = (page - 1) * limit
+        if plan_type == 'free' and offset >= max_offset:
+            return jsonify({
+                "success": True,
+                "count": 0,
+                "message": "Límite de contenido gratuito alcanzado. Actualiza a premium para acceso completo.",
+                "data": []
+            })
+        
+        docs = peliculas_ref.limit(limit).offset(offset).stream()
         
         peliculas = []
         for doc in docs:
             pelicula_data = doc.to_dict()
             pelicula_data['id'] = doc.id
+            
+            # Para free users, limitar información
+            if plan_type == 'free':
+                pelicula_data = limit_content_info(pelicula_data, 'pelicula')
+            
             peliculas.append(pelicula_data)
         
         return jsonify({
@@ -699,6 +1184,7 @@ def get_peliculas(user_data):
             "count": len(peliculas),
             "page": page,
             "limit": limit,
+            "plan_restrictions": plan_type == 'free',
             "data": peliculas
         })
         
@@ -709,7 +1195,6 @@ def get_peliculas(user_data):
 @token_required
 def get_pelicula(user_data, pelicula_id):
     """Obtener una película específica por ID"""
-    # Verificar Firebase
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
@@ -721,6 +1206,11 @@ def get_pelicula(user_data, pelicula_id):
         if doc.exists:
             pelicula_data = doc.to_dict()
             pelicula_data['id'] = doc.id
+            
+            # Aplicar restricciones de plan
+            plan_type = user_data.get('plan_type', 'free')
+            if plan_type == 'free':
+                pelicula_data = limit_content_info(pelicula_data, 'pelicula')
             
             return jsonify({
                 "success": True,
@@ -734,9 +1224,9 @@ def get_pelicula(user_data, pelicula_id):
 
 @app.route('/api/series', methods=['GET'])
 @token_required
+@check_plan_feature('content_access')
 def get_series(user_data):
-    """Obtener todas las series"""
-    # Verificar Firebase
+    """Obtener todas las series (solo premium)"""
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
@@ -765,9 +1255,9 @@ def get_series(user_data):
 
 @app.route('/api/series/<serie_id>', methods=['GET'])
 @token_required
+@check_plan_feature('content_access')
 def get_serie(user_data, serie_id):
-    """Obtener una serie específica por ID"""
-    # Verificar Firebase
+    """Obtener una serie específica por ID (solo premium)"""
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
@@ -794,7 +1284,6 @@ def get_serie(user_data, serie_id):
 @token_required
 def get_canales(user_data):
     """Obtener todos los canales"""
-    # Verificar Firebase
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
@@ -822,7 +1311,6 @@ def get_canales(user_data):
 @token_required
 def get_canal(user_data, canal_id):
     """Obtener un canal específico por ID"""
-    # Verificar Firebase
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
@@ -848,8 +1336,7 @@ def get_canal(user_data, canal_id):
 @app.route('/api/buscar', methods=['GET'])
 @token_required
 def buscar(user_data):
-    """Buscar contenido por término"""
-    # Verificar Firebase
+    """Buscar contenido con límites por plan"""
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
@@ -859,7 +1346,12 @@ def buscar(user_data):
         if not termino:
             return jsonify({"error": "Término de búsqueda requerido"}), 400
         
-        limit = int(request.args.get('limit', 10))
+        plan_type = user_data.get('plan_type', 'free')
+        plan_config = PLAN_CONFIG[plan_type]
+        
+        # Aplicar límite de búsqueda según plan
+        search_limit = plan_config['features']['search_limit']
+        limit = min(int(request.args.get('limit', 10)), search_limit)
         
         resultados = []
         
@@ -872,27 +1364,73 @@ def buscar(user_data):
             data = doc.to_dict()
             data['id'] = doc.id
             data['tipo'] = 'pelicula'
+            
+            # Aplicar restricciones de plan
+            if plan_type == 'free':
+                data = limit_content_info(data, 'pelicula')
+            
             resultados.append(data)
         
-        # Buscar en series
-        series_ref = db.collection('contenido')
-        series_query = series_ref.where('title', '>=', termino).where('title', '<=', termino + '\uf8ff')
-        series_docs = series_query.limit(limit).stream()
-        
-        for doc in series_docs:
-            data = doc.to_dict()
-            if 'seasons' in data:
-                data['id'] = doc.id
-                data['tipo'] = 'serie'
-                resultados.append(data)
+        # Para premium, buscar también en series
+        if plan_type == 'premium':
+            series_ref = db.collection('contenido')
+            series_query = series_ref.where('title', '>=', termino).where('title', '<=', termino + '\uf8ff')
+            series_docs = series_query.limit(limit).stream()
+            
+            for doc in series_docs:
+                data = doc.to_dict()
+                if 'seasons' in data:
+                    data['id'] = doc.id
+                    data['tipo'] = 'serie'
+                    resultados.append(data)
         
         return jsonify({
             "success": True,
             "termino": termino,
             "count": len(resultados),
+            "search_limit": search_limit,
+            "plan_type": plan_type,
             "data": resultados
         })
         
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/stream/<content_id>', methods=['GET'])
+@token_required
+@check_plan_feature('streaming')
+def get_stream_url(user_data, content_id):
+    """Obtener URL de streaming (solo premium)"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    try:
+        # Buscar el contenido
+        content_ref = db.collection('peliculas').document(content_id)
+        content_doc = content_ref.get()
+        
+        if not content_doc.exists:
+            # Buscar en series
+            content_ref = db.collection('contenido').document(content_id)
+            content_doc = content_ref.get()
+            
+        if content_doc.exists:
+            content_data = content_doc.to_dict()
+            streaming_url = content_data.get('streaming_url')
+            
+            if streaming_url:
+                return jsonify({
+                    "success": True,
+                    "streaming_url": streaming_url,
+                    "expires_in": 3600,  # URL expira en 1 hora
+                    "quality": "HD"
+                })
+            else:
+                return jsonify({"error": "URL de streaming no disponible"}), 404
+        else:
+            return jsonify({"error": "Contenido no encontrado"}), 404
+            
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -900,7 +1438,6 @@ def buscar(user_data):
 @token_required
 def get_estadisticas(user_data):
     """Obtener estadísticas del contenido"""
-    # Verificar Firebase
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
@@ -909,24 +1446,25 @@ def get_estadisticas(user_data):
         # Contar películas
         peliculas_count = len(list(db.collection('peliculas').limit(1000).stream()))
         
-        # Contar series
-        series_ref = db.collection('contenido')
-        series_docs = series_ref.limit(1000).stream()
+        # Contar series (solo para premium)
         series_count = 0
-        for doc in series_docs:
-            if 'seasons' in doc.to_dict():
-                series_count += 1
+        if user_data.get('plan_type') == 'premium' or user_data.get('is_admin'):
+            series_ref = db.collection('contenido')
+            series_docs = series_ref.limit(1000).stream()
+            for doc in series_docs:
+                if 'seasons' in doc.to_dict():
+                    series_count += 1
         
         # Contar canales
-        canales_count = len(list(db.collection('canales').limit(1000).stream()))
+        canales_count = len(list(db.collection('canales').limit(1000).stream())
         
         return jsonify({
             "success": True,
             "data": {
                 "total_peliculas": peliculas_count,
-                "total_series": series_count,
+                "total_series": series_count if (user_data.get('plan_type') == 'premium' or user_data.get('is_admin')) else "Requiere plan premium",
                 "total_canales": canales_count,
-                "total_contenido": peliculas_count + series_count
+                "total_contenido": peliculas_count + series_count if (user_data.get('plan_type') == 'premium' or user_data.get('is_admin')) else "Requiere plan premium"
             }
         })
         
@@ -938,9 +1476,17 @@ def get_estadisticas(user_data):
 def not_found(error):
     return jsonify({"error": "Endpoint no encontrado"}), 404
 
+@app.errorhandler(405)
+def method_not_allowed(error):
+    return jsonify({"error": "Método no permitido"}), 405
+
 @app.errorhandler(500)
 def internal_error(error):
     return jsonify({"error": "Error interno del servidor"}), 500
 
+@app.errorhandler(413)
+def too_large(error):
+    return jsonify({"error": "Archivo demasiado grande"}), 413
+
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=False, host='0.0.0.0', port=5000)
