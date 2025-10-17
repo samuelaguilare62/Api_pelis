@@ -25,6 +25,9 @@ EMAIL_CONFIG = {
     'service_enabled': True  # Siempre habilitado, usa método sin autenticación
 }
 
+# Configuración de administrador - AHORA CON VARIABLE DE ENTORNO
+ADMIN_TOKENS = [os.environ.get('ADMIN_TOKEN', 'admin_token_secreto_2024')]
+
 # Configuración de Firebase - SOLO VARIABLES DE ENTORNO
 def initialize_firebase():
     try:
@@ -81,9 +84,6 @@ def initialize_firebase():
 
 # Inicializar Firebase
 db = initialize_firebase()
-
-# Configuración de administrador
-ADMIN_TOKENS = ["admin_token_secreto_2024"]
 
 # Colección para almacenar usuarios y tokens
 TOKENS_COLLECTION = "api_users"
@@ -753,7 +753,8 @@ def diagnostic():
         'FIREBASE_PROJECT_ID': "✅" if os.environ.get('FIREBASE_PROJECT_ID') else "❌", 
         'FIREBASE_PRIVATE_KEY': "✅" if os.environ.get('FIREBASE_PRIVATE_KEY') else "❌",
         'FIREBASE_CLIENT_EMAIL': "✅" if os.environ.get('FIREBASE_CLIENT_EMAIL') else "❌",
-        'ADMIN_EMAIL': "✅" if os.environ.get('ADMIN_EMAIL') else "❌"
+        'ADMIN_EMAIL': "✅" if os.environ.get('ADMIN_EMAIL') else "❌",
+        'ADMIN_TOKEN': "✅" if os.environ.get('ADMIN_TOKEN') else "❌"
     }
     
     # Probar operación de Firestore si está conectado
@@ -1749,7 +1750,7 @@ def get_estadisticas(user_data):
                     series_count += 1
         
         # Contar canales
-        canales_count = len(list(db.collection('canales').limit(1000).stream())
+        canales_count = len(list(db.collection('canales').limit(1000).stream()))
         
         return jsonify({
             "success": True,
@@ -1781,5 +1782,6 @@ def internal_error(error):
 def too_large(error):
     return jsonify({"error": "Archivo demasiado grande"}), 413
 
+# Inicialización de la aplicación
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=5000)
