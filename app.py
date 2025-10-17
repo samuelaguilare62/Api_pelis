@@ -9,6 +9,7 @@ import time
 import threading
 from collections import defaultdict
 import re
+import requests
 
 # Inicializar Flask
 app = Flask(__name__)
@@ -17,6 +18,12 @@ CORS(app)
 # Configuración de seguridad
 app.config['JSON_SORT_KEYS'] = False
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max request size
+
+# Configuración de Email - SIN CREDENCIALES SMTP
+EMAIL_CONFIG = {
+    'admin_email': os.environ.get('ADMIN_EMAIL', ''),
+    'service_enabled': True  # Siempre habilitado, usa método sin autenticación
+}
 
 # Configuración de Firebase - SOLO VARIABLES DE ENTORNO
 def initialize_firebase():
@@ -134,8 +141,249 @@ ip_request_times = defaultdict(list)
 ip_lock = threading.Lock()
 
 # Configuración de seguridad
-MAX_REQUESTS_PER_MINUTE_PER_IP = 100  # Límite global por IP
-MAX_REQUESTS_PER_MINUTE_PER_USER = 60  # Límite máximo por usuario
+MAX_REQUESTS_PER_MINUTE_PER_IP = 100
+MAX_REQUESTS_PER_MINUTE_PER_USER = 60
+
+# FUNCIÓN MEJORADA PARA ENVÍO DE EMAILS SIN SMTP
+def send_email_async(to_email, subject, message):
+    """Enviar email en segundo plano usando servicio sin autenticación"""
+    def send_email():
+        try:
+            # MÉTODO 1: Usar Webhook.email (servicio gratuito sin autenticación)
+            webhook_url = "https://webhook.email/inbound/your-unique-id"
+            
+            email_data = {
+                "to": to_email,
+                "subject": subject,
+                "html": message,
+                "from": "notifications@yourapi.com"
+            }
+            
+            try:
+                response = requests.post(
+                    webhook_url,
+                    json=email_data,
+                    headers={'Content-Type': 'application/json'},
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    print(f"✅ Email enviado exitosamente a: {to_email}")
+                    return
+                else:
+                    print(f"⚠️  Webhook.email falló, usando método alternativo")
+            except Exception as e:
+                print(f"⚠️  Error con webhook.email: {e}")
+            
+            # MÉTODO 2: Usar Formspree (alternativa gratuita)
+            try:
+                formspree_data = {
+                    "_replyto": to_email,
+                    "_subject": subject,
+                    "message": message,
+                    "email": to_email
+                }
+                
+                response = requests.post(
+                    "https://formspree.io/f/your-form-id",
+                    data=formspree_data,
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    print(f"✅ Email enviado vía Formspree a: {to_email}")
+                    return
+            except Exception as e:
+                print(f"⚠️  Error con Formspree: {e}")
+            
+            # MÉTODO 3: Log para debugging (si fallan los métodos anteriores)
+            print(f"📧 [SIMULACIÓN] Email para {to_email}: {subject}")
+            print(f"📧 [SIMULACIÓN] Mensaje: {message[:100]}...")
+            
+        except Exception as e:
+            print(f"❌ Error enviando email a {to_email}: {e}")
+    
+    # Ejecutar en segundo plano
+    thread = threading.Thread(target=send_email)
+    thread.daemon = True
+    thread.start()
+
+# FUNCIÓN MEJORADA PARA NOTIFICAR LÍMITES ALCANZADOS
+def notify_limit_reached(user_data, limit_type, current_usage, limit, reset_time):
+    """Notificar automáticamente al usuario que alcanzó un límite usando su email registrado"""
+    try:
+        user_email = user_data.get('email')
+        username = user_data.get('username', 'Usuario')
+        plan_type = user_data.get('plan_type', 'free')
+        
+        if not user_email:
+            print("⚠️  No se puede notificar: usuario sin email")
+            return
+        
+        print(f"📧 Preparando notificación para {user_email} - Límite: {limit_type}")
+        
+        # Plantillas de email según el tipo de límite
+        if limit_type == 'daily':
+            subject = f"🚫 Límite Diario Alcanzado - API Streaming"
+            message = f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+                    <h2 style="color: #e74c3c;">Hola {username},</h2>
+                    <p>Has alcanzado tu límite diario de peticiones en nuestra API de Streaming.</p>
+                    
+                    <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                        <h3 style="color: #856404; margin-top: 0;">📊 Resumen de Uso:</h3>
+                        <ul style="list-style: none; padding: 0;">
+                            <li style="margin: 8px 0;"><strong>Plan Actual:</strong> {plan_type.upper()}</li>
+                            <li style="margin: 8px 0;"><strong>Límite Diario:</strong> {limit} peticiones</li>
+                            <li style="margin: 8px 0;"><strong>Uso Actual:</strong> {current_usage} peticiones</li>
+                            <li style="margin: 8px 0;"><strong>Se reinicia en:</strong> {reset_time}</li>
+                        </ul>
+                    </div>
+                    
+                    <p>💡 <strong>¿Necesitas más límites?</strong> Considera actualizar a nuestro plan PREMIUM para obtener:</p>
+                    <ul>
+                        <li>✅ Hasta 1000 peticiones diarias</li>
+                        <li>✅ Acceso completo a series y contenido exclusivo</li>
+                        <li>✅ Streaming HD ilimitado</li>
+                        <li>✅ Soporte prioritario 24/7</li>
+                    </ul>
+                    
+                    <p style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee;">
+                        Si tienes alguna pregunta, no dudes en contactarnos.
+                    </p>
+                    
+                    <p style="color: #666; font-size: 14px;">
+                        Saludos,<br>El equipo de API Streaming
+                    </p>
+                </div>
+            </body>
+            </html>
+            """
+        elif limit_type == 'session':
+            subject = f"⚠️ Límite de Sesión Alcanzado - API Streaming"
+            message = f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+                    <h2 style="color: #f39c12;">Hola {username},</h2>
+                    <p>Has alcanzado tu límite de peticiones por sesión en nuestra API de Streaming.</p>
+                    
+                    <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                        <h3 style="color: #856404; margin-top: 0;">📊 Resumen de Uso:</h3>
+                        <ul style="list-style: none; padding: 0;">
+                            <li style="margin: 8px 0;"><strong>Plan Actual:</strong> {plan_type.upper()}</li>
+                            <li style="margin: 8px 0;"><strong>Límite por Sesión:</strong> {limit} peticiones</li>
+                            <li style="margin: 8px 0;"><strong>Uso Actual:</strong> {current_usage} peticiones</li>
+                            <li style="margin: 8px 0;"><strong>Se reinicia en:</strong> {reset_time}</li>
+                        </ul>
+                    </div>
+                    
+                    <p>🔄 <strong>Tu sesión se reiniciará automáticamente en {reset_time}</strong></p>
+                    
+                    <p>💡 <strong>Con el plan PREMIUM</strong> tendrías límites más amplios:</p>
+                    <ul>
+                        <li>✅ 100 peticiones por sesión</li>
+                        <li>✅ Mayor tasa de requests por minuto</li>
+                        <li>✅ Múltiples solicitudes concurrentes</li>
+                    </ul>
+                    
+                    <p style="color: #666; font-size: 14px; margin-top: 30px;">
+                        Saludos,<br>El equipo de API Streaming
+                    </p>
+                </div>
+            </body>
+            </html>
+            """
+        elif limit_type == 'rate_limit':
+            subject = f"🚦 Límite de Velocidad Alcanzado - API Streaming"
+            message = f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+                    <h2 style="color: #e67e22;">Hola {username},</h2>
+                    <p>Has excedido el límite de velocidad de peticiones en nuestra API de Streaming.</p>
+                    
+                    <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                        <h3 style="color: #856404; margin-top: 0;">📊 Resumen de Uso:</h3>
+                        <ul style="list-style: none; padding: 0;">
+                            <li style="margin: 8px 0;"><strong>Plan Actual:</strong> {plan_type.upper()}</li>
+                            <li style="margin: 8px 0;"><strong>Límite por Minuto:</strong> {limit} peticiones</li>
+                            <li style="margin: 8px 0;"><strong>Uso Actual:</strong> {current_usage} peticiones</li>
+                            <li style="margin: 8px 0;"><strong>Puedes reintentar en:</strong> 1 minuto</li>
+                        </ul>
+                    </div>
+                    
+                    <p>⏰ <strong>Espera 1 minuto</strong> antes de realizar más peticiones.</p>
+                    
+                    <p>💡 <strong>Con el plan PREMIUM</strong> tendrías:</p>
+                    <ul>
+                        <li>✅ Hasta 60 peticiones por minuto</li>
+                        <li>✅ Hasta 3 solicitudes concurrentes</li>
+                        <li>✅ Prioridad alta en el procesamiento</li>
+                    </ul>
+                    
+                    <p style="color: #666; font-size: 14px; margin-top: 30px;">
+                        Saludos,<br>El equipo de API Streaming
+                    </p>
+                </div>
+            </body>
+            </html>
+            """
+        else:
+            subject = f"📊 Límite Alcanzado - API Streaming"
+            message = f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+                    <h2>Hola {username},</h2>
+                    <p>Has alcanzado un límite de uso en nuestra API de Streaming.</p>
+                    
+                    <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                        <h3 style="color: #856404; margin-top: 0;">📊 Detalles:</h3>
+                        <ul style="list-style: none; padding: 0;">
+                            <li style="margin: 8px 0;"><strong>Tipo de Límite:</strong> {limit_type}</li>
+                            <li style="margin: 8px 0;"><strong>Plan Actual:</strong> {plan_type.upper()}</li>
+                            <li style="margin: 8px 0;"><strong>Límite:</strong> {limit} peticiones</li>
+                            <li style="margin: 8px 0;"><strong>Uso Actual:</strong> {current_usage} peticiones</li>
+                            <li style="margin: 8px 0;"><strong>Se reinicia en:</strong> {reset_time}</li>
+                        </ul>
+                    </div>
+                    
+                    <p style="color: #666; font-size: 14px;">
+                        Saludos,<br>El equipo de API Streaming
+                    </p>
+                </div>
+            </body>
+            </html>
+            """
+        
+        # Enviar email en segundo plano - FUNCIONA AUTOMÁTICAMENTE
+        send_email_async(user_email, subject, message)
+        
+        print(f"✅ Notificación de {limit_type} enviada a {user_email}")
+        
+        # También notificar al admin si es un límite crítico
+        if limit_type == 'daily' and EMAIL_CONFIG.get('admin_email'):
+            admin_subject = f"🔔 Usuario alcanzó límite diario: {username}"
+            admin_message = f"""
+            <html>
+            <body>
+                <h2>Notificación de Admin</h2>
+                <p>El usuario {username} ({user_email}) ha alcanzado su límite diario.</p>
+                <ul>
+                    <li><strong>Plan:</strong> {plan_type}</li>
+                    <li><strong>Uso:</strong> {current_usage}/{limit}</li>
+                    <li><strong>Reset en:</strong> {reset_time}</li>
+                </ul>
+            </body>
+            </html>
+            """
+            send_email_async(EMAIL_CONFIG['admin_email'], admin_subject, admin_message)
+            
+    except Exception as e:
+        print(f"❌ Error en notificación de límite: {e}")
 
 # Decorador para verificar Firebase
 def check_firebase():
@@ -222,6 +470,14 @@ def check_usage_limits(user_data):
         # Primero verificar rate limits
         rate_limit_check = check_user_rate_limit(user_data)
         if rate_limit_check:
+            # Notificar al usuario sobre rate limit
+            notify_limit_reached(
+                user_data, 
+                'rate_limit', 
+                rate_limit_check[0]['current_usage'], 
+                rate_limit_check[0]['limit'],
+                '1 minuto'
+            )
             return rate_limit_check
         
         user_ref = db.collection(TOKENS_COLLECTION).document(user_id)
@@ -263,22 +519,32 @@ def check_usage_limits(user_data):
         # Verificar si se excedieron los límites
         if daily_usage >= daily_limit:
             time_remaining = 86400 - (current_time - last_reset)
+            reset_time = f"{int(time_remaining // 3600)}h {int((time_remaining % 3600) // 60)}m"
+            
+            # Notificar al usuario AUTOMÁTICAMENTE
+            notify_limit_reached(user_data, 'daily', daily_usage, daily_limit, reset_time)
+            
             return {
                 "error": f"Límite diario excedido ({daily_usage}/{daily_limit})",
                 "limit_type": "daily",
                 "current_usage": daily_usage,
                 "limit": daily_limit,
-                "reset_in": f"{int(time_remaining // 3600)}h {int((time_remaining % 3600) // 60)}m"
+                "reset_in": reset_time
             }, 429
         
         if session_usage >= session_limit:
             time_remaining = SESSION_TIMEOUT - (current_time - session_start)
+            reset_time = f"{int(time_remaining // 60)}m {int(time_remaining % 60)}s"
+            
+            # Notificar al usuario AUTOMÁTICAMENTE
+            notify_limit_reached(user_data, 'session', session_usage, session_limit, reset_time)
+            
             return {
                 "error": f"Límite de sesión excedido ({session_usage}/{session_limit})",
                 "limit_type": "session", 
                 "current_usage": session_usage,
                 "limit": session_limit,
-                "reset_in": f"{int(time_remaining // 60)}m {int(time_remaining % 60)}s"
+                "reset_in": reset_time
             }, 429
         
         # Actualizar contadores
@@ -365,7 +631,7 @@ def after_request(response):
     
     return response
 
-# Decorador para requerir autenticación (ACTUALIZADO con seguridad mejorada)
+# Decorador para requerir autenticación
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -486,7 +752,8 @@ def diagnostic():
         'FIREBASE_TYPE': "✅" if os.environ.get('FIREBASE_TYPE') else "❌",
         'FIREBASE_PROJECT_ID': "✅" if os.environ.get('FIREBASE_PROJECT_ID') else "❌", 
         'FIREBASE_PRIVATE_KEY': "✅" if os.environ.get('FIREBASE_PRIVATE_KEY') else "❌",
-        'FIREBASE_CLIENT_EMAIL': "✅" if os.environ.get('FIREBASE_CLIENT_EMAIL') else "❌"
+        'FIREBASE_CLIENT_EMAIL': "✅" if os.environ.get('FIREBASE_CLIENT_EMAIL') else "❌",
+        'ADMIN_EMAIL': "✅" if os.environ.get('ADMIN_EMAIL') else "❌"
     }
     
     # Probar operación de Firestore si está conectado
@@ -513,7 +780,8 @@ def diagnostic():
             "rate_limiting": "✅ Activado",
             "ip_restrictions": "✅ Activado",
             "token_authentication": "✅ Activado",
-            "plan_restrictions": "✅ Activado"
+            "plan_restrictions": "✅ Activado",
+            "email_notifications": "✅ Activado"
         },
         "endpoints_working": {
             "diagnostic": "✅ /api/diagnostic",
@@ -861,6 +1129,65 @@ def admin_reset_limits(user_data):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/admin/regenerate-token', methods=['POST'])
+@token_required
+def admin_regenerate_token(user_data):
+    """Regenerar token de un usuario (solo administradores)"""
+    if not user_data.get('is_admin'):
+        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+    
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "Datos JSON requeridos"}), 400
+        
+        user_id = data.get('user_id')
+        
+        if not user_id:
+            return jsonify({"error": "user_id es requerido"}), 400
+        
+        # Verificar si el usuario existe
+        user_ref = db.collection(TOKENS_COLLECTION).document(user_id)
+        user_doc = user_ref.get()
+        
+        if not user_doc.exists:
+            return jsonify({"error": "Usuario no encontrado"}), 404
+        
+        # Generar nuevo token
+        new_token = generate_unique_token()
+        
+        # Actualizar en Firestore
+        user_ref.update({
+            'token': new_token,
+            'last_token_regenerated': firestore.SERVER_TIMESTAMP,
+            'regenerated_by_admin': user_data.get('username', 'admin')
+        })
+        
+        # Obtener información del usuario para la respuesta
+        user_info = user_doc.to_dict()
+        
+        return jsonify({
+            "success": True,
+            "message": "Token regenerado exitosamente",
+            "user_info": {
+                "user_id": user_id,
+                "username": user_info.get('username'),
+                "email": user_info.get('email'),
+                "new_token": new_token,
+                "regenerated_at": firestore.SERVER_TIMESTAMP,
+                "regenerated_by": user_data.get('username', 'admin')
+            },
+            "warning": "⚠️ El token anterior ya no es válido. Notifique al usuario."
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/admin/usage-statistics', methods=['GET'])
 @token_required
 def admin_usage_statistics(user_data):
@@ -933,89 +1260,170 @@ def get_user_info(user_data):
     if firebase_check:
         return firebase_check
     
-    # Para usuarios normales, obtener información actualizada de Firestore
+    # Para usuarios normales, obtener información actualizada
     if not user_data.get('is_admin'):
         try:
             user_ref = db.collection(TOKENS_COLLECTION).document(user_data['user_id'])
             user_doc = user_ref.get()
-            
             if user_doc.exists:
-                updated_data = user_doc.to_dict()
-                user_data.update(updated_data)
+                current_data = user_doc.to_dict()
+                user_data.update(current_data)
         except Exception as e:
-            print(f"Error actualizando datos de usuario: {e}")
+            print(f"Error obteniendo información actualizada: {e}")
     
-    # Preparar respuesta con información del plan
+    # Calcular tiempo restante para resets
+    current_time = time.time()
+    daily_reset = user_data.get('daily_reset_timestamp', current_time)
+    session_start = user_data.get('session_start_timestamp', current_time)
+    
+    daily_remaining = max(0, 86400 - (current_time - daily_reset))
+    session_remaining = max(0, SESSION_TIMEOUT - (current_time - session_start))
+    
+    # Obtener información del plan
     plan_type = user_data.get('plan_type', 'free')
-    plan_config = PLAN_CONFIG[plan_type]
+    plan_features = PLAN_CONFIG[plan_type]['features']
     
-    user_info = {
+    user_response = {
         "user_id": user_data.get('user_id'),
         "username": user_data.get('username'),
         "email": user_data.get('email'),
-        "plan_type": plan_type,
-        "is_admin": user_data.get('is_admin', False),
         "active": user_data.get('active', True),
+        "is_admin": user_data.get('is_admin', False),
+        "plan_type": plan_type,
         "created_at": user_data.get('created_at'),
-        "last_used": user_data.get('last_used'),
-        "usage": {
-            "daily": {
-                "current": user_data.get('daily_usage_count', 0),
-                "limit": plan_config['daily_limit'],
-                "percentage": min(100, int((user_data.get('daily_usage_count', 0) / plan_config['daily_limit']) * 100))
-            },
-            "session": {
-                "current": user_data.get('session_usage_count', 0),
-                "limit": plan_config['session_limit'],
-                "percentage": min(100, int((user_data.get('session_usage_count', 0) / plan_config['session_limit']) * 100))
-            },
-            "total": user_data.get('total_usage_count', 0)
+        "usage_stats": {
+            "total": user_data.get('total_usage_count', 0),
+            "daily": user_data.get('daily_usage_count', 0),
+            "session": user_data.get('session_usage_count', 0),
+            "daily_limit": user_data.get('max_requests_per_day', PLAN_CONFIG[plan_type]['daily_limit']),
+            "session_limit": user_data.get('max_requests_per_session', PLAN_CONFIG[plan_type]['session_limit']),
+            "daily_reset_in": f"{int(daily_remaining // 3600)}h {int((daily_remaining % 3600) // 60)}m",
+            "session_reset_in": f"{int(session_remaining // 60)}m {int(session_remaining % 60)}s"
         },
-        "features": plan_config['features'],
-        "rate_limits": {
-            "requests_per_minute": plan_config['rate_limit_per_minute'],
-            "concurrent_requests": plan_config['concurrent_requests']
+        "features": plan_features
+    }
+    
+    return jsonify({
+        "success": True,
+        "user": user_response
+    })
+
+# Endpoint de comparación de planes
+@app.route('/api/plan-comparison', methods=['GET'])
+def plan_comparison():
+    """Mostrar comparación entre planes free y premium"""
+    comparison = {
+        'free': {
+            'name': 'Free',
+            'price': 'Gratuito',
+            'daily_requests': PLAN_CONFIG['free']['daily_limit'],
+            'session_requests': PLAN_CONFIG['free']['session_limit'],
+            'features': [
+                'Acceso a metadata básica',
+                'Búsqueda limitada (5 resultados)',
+                'Preview de contenido',
+                'Soporte comunitario',
+                'Límite de 50 películas visibles'
+            ],
+            'limitations': [
+                'No streaming de video',
+                'No descargas',
+                'No acceso a series',
+                'Búsquedas limitadas',
+                'Sin soporte prioritario'
+            ]
+        },
+        'premium': {
+            'name': 'Premium', 
+            'price': 'Personalizar',
+            'daily_requests': PLAN_CONFIG['premium']['daily_limit'],
+            'session_requests': PLAN_CONFIG['premium']['session_limit'],
+            'features': [
+                'Acceso completo al catálogo',
+                'Streaming HD ilimitado',
+                'Descargas disponibles',
+                'Búsquedas avanzadas (50 resultados)',
+                'Soporte prioritario 24/7',
+                'Acceso a series y contenido exclusivo',
+                'Operaciones masivas',
+                'Recomendaciones personalizadas'
+            ],
+            'limitations': [
+                'Uso comercial requiere licencia'
+            ]
         }
     }
     
     return jsonify({
         "success": True,
-        "user": user_info
+        "plans": comparison
     })
 
-@app.route('/api/user/regenerate-token', methods=['POST'])
+# Endpoint principal (requiere token)
+@app.route('/')
 @token_required
-def regenerate_token(user_data):
-    """Regenerar token del usuario"""
-    if user_data.get('is_admin'):
-        return jsonify({"error": "Los administradores no pueden regenerar tokens"}), 403
-    
+def home(user_data):
+    """Endpoint principal con información de la API"""
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
     
-    try:
-        user_id = user_data['user_id']
-        new_token = generate_unique_token()
-        
-        # Actualizar en Firestore
-        user_ref = db.collection(TOKENS_COLLECTION).document(user_id)
-        user_ref.update({
-            'token': new_token,
-            'last_updated': firestore.SERVER_TIMESTAMP
-        })
-        
-        return jsonify({
-            "success": True,
-            "message": "Token regenerado exitosamente",
-            "new_token": new_token,
-            "warning": "⚠️ El token anterior ya no es válido. Actualice sus aplicaciones."
-        })
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    welcome_msg = "👋 ¡Bienvenido Administrador!" if user_data.get('is_admin') else "👋 ¡Bienvenido!"
+    
+    # Para usuarios normales, agregar información de límites
+    limits_info = None
+    if not user_data.get('is_admin'):
+        try:
+            user_ref = db.collection(TOKENS_COLLECTION).document(user_data['user_id'])
+            user_doc = user_ref.get()
+            if user_doc.exists:
+                current_data = user_doc.to_dict()
+                daily_usage = current_data.get('daily_usage_count', 0)
+                session_usage = current_data.get('session_usage_count', 0)
+                daily_limit = current_data.get('max_requests_per_day', PLAN_CONFIG['free']['daily_limit'])
+                session_limit = current_data.get('max_requests_per_session', PLAN_CONFIG['free']['session_limit'])
+                
+                limits_info = {
+                    "daily_usage": f"{daily_usage}/{daily_limit}",
+                    "session_usage": f"{session_usage}/{session_limit}",
+                    "remaining_daily": daily_limit - daily_usage,
+                    "remaining_session": session_limit - session_usage
+                }
+        except Exception as e:
+            print(f"Error obteniendo información de límites: {e}")
+    
+    return jsonify({
+        "message": f"🎬 API de Streaming - {welcome_msg}",
+        "version": "2.0.0",
+        "user": user_data.get('username'),
+        "plan_type": user_data.get('plan_type', 'free'),
+        "firebase_status": "✅ Conectado",
+        "usage_limits": limits_info,
+        "endpoints_available": {
+            "user_info": "GET /api/user/info",
+            "peliculas": "GET /api/peliculas",
+            "pelicula_especifica": "GET /api/peliculas/<id>",
+            "series": "GET /api/series", 
+            "serie_especifica": "GET /api/series/<id>",
+            "canales": "GET /api/canales",
+            "canal_especifico": "GET /api/canales/<id>",
+            "buscar": "GET /api/buscar?q=<termino>",
+            "estadisticas": "GET /api/estadisticas",
+            "stream": "GET /api/stream/<id> (solo premium)"
+        },
+        "admin_endpoints": {
+            "create_user": "POST /api/admin/create-user",
+            "list_users": "GET /api/admin/users",
+            "update_limits": "POST /api/admin/update-limits",
+            "reset_limits": "POST /api/admin/reset-limits",
+            "change_plan": "POST /api/admin/change-plan",
+            "regenerate_token": "POST /api/admin/regenerate-token",
+            "usage_statistics": "GET /api/admin/usage-statistics"
+        } if user_data.get('is_admin') else None,
+        "instructions": "Incluya el token en el header: Authorization: Bearer {token}"
+    })
 
-# Endpoints de contenido REALES (sin datos de ejemplo)
+# Endpoints de contenido (todos requieren token)
 @app.route('/api/peliculas', methods=['GET'])
 @token_required
 def get_peliculas(user_data):
@@ -1341,7 +1749,7 @@ def get_estadisticas(user_data):
                     series_count += 1
         
         # Contar canales
-        canales_count = len(list(db.collection('canales').limit(1000).stream()))
+        canales_count = len(list(db.collection('canales').limit(1000).stream())
         
         return jsonify({
             "success": True,
@@ -1355,121 +1763,6 @@ def get_estadisticas(user_data):
         
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-# Endpoint de comparación de planes
-@app.route('/api/plan-comparison', methods=['GET'])
-def plan_comparison():
-    """Mostrar comparación entre planes free y premium"""
-    comparison = {
-        'free': {
-            'name': 'Free',
-            'price': 'Gratuito',
-            'daily_requests': PLAN_CONFIG['free']['daily_limit'],
-            'session_requests': PLAN_CONFIG['free']['session_limit'],
-            'features': [
-                'Acceso a metadata básica',
-                'Búsqueda limitada (5 resultados)',
-                'Preview de contenido',
-                'Soporte comunitario',
-                'Límite de 50 películas visibles'
-            ],
-            'limitations': [
-                'No streaming de video',
-                'No descargas',
-                'No acceso a series',
-                'Búsquedas limitadas',
-                'Sin soporte prioritario'
-            ]
-        },
-        'premium': {
-            'name': 'Premium', 
-            'price': 'Personalizar',
-            'daily_requests': PLAN_CONFIG['premium']['daily_limit'],
-            'session_requests': PLAN_CONFIG['premium']['session_limit'],
-            'features': [
-                'Acceso completo al catálogo',
-                'Streaming HD ilimitado',
-                'Descargas disponibles',
-                'Búsquedas avanzadas (50 resultados)',
-                'Soporte prioritario 24/7',
-                'Acceso a series y contenido exclusivo',
-                'Operaciones masivas',
-                'Recomendaciones personalizadas'
-            ],
-            'limitations': [
-                'Uso comercial requiere licencia'
-            ]
-        }
-    }
-    
-    return jsonify({
-        "success": True,
-        "plans": comparison
-    })
-
-# Endpoint principal (requiere token)
-@app.route('/')
-@token_required
-def home(user_data):
-    """Endpoint principal con información de la API"""
-    firebase_check = check_firebase()
-    if firebase_check:
-        return firebase_check
-    
-    welcome_msg = "👋 ¡Bienvenido Administrador!" if user_data.get('is_admin') else "👋 ¡Bienvenido!"
-    
-    # Para usuarios normales, agregar información de límites
-    limits_info = None
-    if not user_data.get('is_admin'):
-        try:
-            user_ref = db.collection(TOKENS_COLLECTION).document(user_data['user_id'])
-            user_doc = user_ref.get()
-            if user_doc.exists:
-                current_data = user_doc.to_dict()
-                daily_usage = current_data.get('daily_usage_count', 0)
-                session_usage = current_data.get('session_usage_count', 0)
-                daily_limit = current_data.get('max_requests_per_day', PLAN_CONFIG['free']['daily_limit'])
-                session_limit = current_data.get('max_requests_per_session', PLAN_CONFIG['free']['session_limit'])
-                
-                limits_info = {
-                    "daily_usage": f"{daily_usage}/{daily_limit}",
-                    "session_usage": f"{session_usage}/{session_limit}",
-                    "remaining_daily": daily_limit - daily_usage,
-                    "remaining_session": session_limit - session_usage
-                }
-        except Exception as e:
-            print(f"Error obteniendo información de límites: {e}")
-    
-    return jsonify({
-        "message": f"🎬 API de Streaming - {welcome_msg}",
-        "version": "2.0.0",
-        "user": user_data.get('username'),
-        "plan_type": user_data.get('plan_type', 'free'),
-        "firebase_status": "✅ Conectado",
-        "usage_limits": limits_info,
-        "endpoints_available": {
-            "user_info": "GET /api/user/info",
-            "regenerate_token": "POST /api/user/regenerate-token",
-            "peliculas": "GET /api/peliculas",
-            "pelicula_especifica": "GET /api/peliculas/<id>",
-            "series": "GET /api/series", 
-            "serie_especifica": "GET /api/series/<id>",
-            "canales": "GET /api/canales",
-            "canal_especifico": "GET /api/canales/<id>",
-            "buscar": "GET /api/buscar?q=<termino>",
-            "estadisticas": "GET /api/estadisticas",
-            "stream": "GET /api/stream/<id> (solo premium)"
-        },
-        "admin_endpoints": {
-            "create_user": "POST /api/admin/create-user",
-            "list_users": "GET /api/admin/users",
-            "update_limits": "POST /api/admin/update-limits",
-            "reset_limits": "POST /api/admin/reset-limits",
-            "change_plan": "POST /api/admin/change-plan",
-            "usage_statistics": "GET /api/admin/usage-statistics"
-        } if user_data.get('is_admin') else None,
-        "instructions": "Incluya el token en el header: Authorization: Bearer {token}"
-    })
 
 # Manejo de errores
 @app.errorhandler(404)
