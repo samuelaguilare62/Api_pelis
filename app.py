@@ -24,37 +24,43 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max request size
 # Configuración de Email - SIN CREDENCIALES SMTP
 EMAIL_CONFIG = {
     'admin_email': os.environ.get('ADMIN_EMAIL', ''),
-    'service_enabled': True
+    'service_enabled': True  # Siempre habilitado, usa método sin autenticación
 }
 
-# SISTEMA DE TOKENS CONFIGURABLE - UN token para desarrollo, UN token para producción
+# SISTEMA DE TOKENS MEJORADO - CON AMBOS TOKENS VISIBLES
 ADMIN_TOKENS_HASH = set()
-TOKEN_ACTUAL = "desarrollo"  # o "producción"
+TOKEN_ACTUAL = "desarrollo"
+TOKEN_ORIGINAL_DESARROLLO = "token_desarrollo_2024"
+TOKEN_HASH_DESARROLLO = ""
+TOKEN_ORIGINAL_PRODUCCION = ""
+TOKEN_HASH_PRODUCCION = ""
 
 def initialize_tokens():
-    """Inicializar tokens - Detecta automáticamente si usar desarrollo o producción"""
-    global ADMIN_TOKENS_HASH, TOKEN_ACTUAL
+    """Inicializar tokens - Con información completa de ambos tokens"""
+    global ADMIN_TOKENS_HASH, TOKEN_ACTUAL, TOKEN_HASH_DESARROLLO, TOKEN_ORIGINAL_PRODUCCION, TOKEN_HASH_PRODUCCION
     
     # Verificar si hay tokens de producción configurados
     admin_tokens_hashed = os.environ.get('ADMIN_TOKENS_HASHED', '')
     
     if admin_tokens_hashed and admin_tokens_hashed.strip():
-        # MODO PRODUCCIÓN - Usar tokens de variables de entorno
+        # 🚀 MODO PRODUCCIÓN - Usar tokens de variables de entorno
         hashes = [h.strip() for h in admin_tokens_hashed.split(',') if h.strip()]
         ADMIN_TOKENS_HASH.update(hashes)
         TOKEN_ACTUAL = "producción"
-        print(f"🚀 MODO PRODUCCIÓN: {len(ADMIN_TOKENS_HASH)} tokens cargados desde variables de entorno")
+        TOKEN_HASH_PRODUCCION = hashes[0] if hashes else ""
+        
+        print(f"🚀 MODO PRODUCCIÓN: {len(ADMIN_TOKENS_HASH)} tokens cargados")
+        print("💡 Token de producción configurado (hash)")
         
     else:
-        # MODO DESARROLLO - Usar token por defecto
-        default_token = "token_desarrollo_2024"
-        token_hash = hashlib.sha256(default_token.encode()).hexdigest()
-        ADMIN_TOKENS_HASH.add(token_hash)
+        # 🔧 MODO DESARROLLO - Usar token por defecto
+        TOKEN_HASH_DESARROLLO = hashlib.sha256(TOKEN_ORIGINAL_DESARROLLO.encode()).hexdigest()
+        ADMIN_TOKENS_HASH.add(TOKEN_HASH_DESARROLLO)
         TOKEN_ACTUAL = "desarrollo"
+        
         print("⚙️  MODO DESARROLLO: Usando token por defecto")
-        print(f"🔧 Token desarrollo: {default_token}")
-        print(f"🔧 Hash desarrollo: {token_hash}")
-        print("💡 Para producción: Configura ADMIN_TOKENS_HASHED en Render.com")
+        print(f"🔑 Token desarrollo ORIGINAL: {TOKEN_ORIGINAL_DESARROLLO}")
+        print(f"🔐 Hash desarrollo: {TOKEN_HASH_DESARROLLO}")
 
 def verify_admin_token(token):
     """Verificar token de admin"""
@@ -62,6 +68,38 @@ def verify_admin_token(token):
         return False
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     return token_hash in ADMIN_TOKENS_HASH
+
+def get_token_info():
+    """Obtener información completa de los tokens"""
+    token_info = {
+        "modo_actual": TOKEN_ACTUAL,
+        "tokens_aceptados": []
+    }
+    
+    if TOKEN_ACTUAL == "desarrollo":
+        token_info["tokens_aceptados"].append({
+            "tipo": "original",
+            "token": TOKEN_ORIGINAL_DESARROLLO,
+            "uso": "Usar en headers: Authorization: Bearer [este_token]"
+        })
+        token_info["tokens_aceptados"].append({
+            "tipo": "hash", 
+            "token": TOKEN_HASH_DESARROLLO,
+            "uso": "Solo para verificación interna"
+        })
+    else:
+        token_info["tokens_aceptados"].append({
+            "tipo": "original", 
+            "token": "Configurado en ADMIN_TOKENS_HASHED (variable entorno)",
+            "uso": "Usar el token ORIGINAL que generaste"
+        })
+        token_info["tokens_aceptados"].append({
+            "tipo": "hash",
+            "token": TOKEN_HASH_PRODUCCION,
+            "uso": "Solo para verificación interna"
+        })
+    
+    return token_info
 
 # Inicializar tokens al inicio
 initialize_tokens()
@@ -634,6 +672,10 @@ def admin_token_required(f):
             return jsonify({"error": "Formato de token inválido"}), 401
         
         if not verify_admin_token(token):
+            print(f"❌ Token inválido recibido: {token[:20]}...")
+            print(f"💡 Modo actual: {TOKEN_ACTUAL}")
+            if TOKEN_ACTUAL == "desarrollo":
+                print(f"🔑 Usa este token ORIGINAL: {TOKEN_ORIGINAL_DESARROLLO}")
             return jsonify({"error": "Token de administrador inválido"}), 401
         
         return f(*args, **kwargs)
@@ -795,10 +837,10 @@ def public_all_content():
                 "series": series, 
                 "canales": canales
             },
+            "token_info": get_token_info(),
             "metadata": {
                 "version": "1.0.0",
                 "endpoint": "public",
-                "token_mode": TOKEN_ACTUAL,
                 "cache_recomendado": 300
             }
         })
@@ -837,7 +879,7 @@ def public_peliculas():
             "count": len(peliculas),
             "page": page,
             "limit": limit,
-            "token_mode": TOKEN_ACTUAL,
+            "token_info": get_token_info(),
             "data": peliculas
         })
         
@@ -866,7 +908,7 @@ def public_series():
         return jsonify({
             "success": True,
             "count": len(series),
-            "token_mode": TOKEN_ACTUAL,
+            "token_info": get_token_info(),
             "data": series
         })
         
@@ -894,7 +936,7 @@ def public_canales():
         return jsonify({
             "success": True,
             "count": len(canales),
-            "token_mode": TOKEN_ACTUAL,
+            "token_info": get_token_info(),
             "data": canales
         })
         
@@ -923,7 +965,7 @@ def public_estadisticas():
         
         return jsonify({
             "success": True,
-            "token_mode": TOKEN_ACTUAL,
+            "token_info": get_token_info(),
             "data": {
                 "total_peliculas": peliculas_count,
                 "total_series": series_count,
@@ -977,7 +1019,7 @@ def public_search():
             "success": True,
             "query": query,
             "count": len(resultados),
-            "token_mode": TOKEN_ACTUAL,
+            "token_info": get_token_info(),
             "data": resultados
         })
         
@@ -998,12 +1040,6 @@ def diagnostic():
         'ADMIN_EMAIL': "✅" if os.environ.get('ADMIN_EMAIL') else "❌"
     }
     
-    token_info = {
-        'token_mode': TOKEN_ACTUAL,
-        'admin_tokens_cargados': len(ADMIN_TOKENS_HASH),
-        'tokens_prehasheados': True
-    }
-    
     firestore_test = "No probado"
     if db:
         try:
@@ -1019,7 +1055,7 @@ def diagnostic():
         "system": {
             "firebase_status": firebase_status,
             "firestore_test": firestore_test,
-            "token_info": token_info,
+            "token_info": get_token_info(),
             "environment_variables": env_vars
         },
         "security": {
@@ -1027,214 +1063,6 @@ def diagnostic():
             "token_authentication": "✅ Activado", 
             "tokens_prehasheados": "✅ Activado"
         }
-    })
-
-# Endpoints de administración (solo para admins)
-@app.route('/api/admin/create-user', methods=['POST'])
-@token_required
-def admin_create_user(user_data):
-    """Crear nuevo usuario con plan específico (solo administradores)"""
-    if not user_data.get('is_admin'):
-        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
-    
-    firebase_check = check_firebase()
-    if firebase_check:
-        return firebase_check
-    
-    try:
-        data = request.get_json()
-        
-        if not data:
-            return jsonify({"error": "Datos JSON requeridos"}), 400
-        
-        username = data.get('username')
-        email = data.get('email')
-        plan_type = data.get('plan_type', 'free').lower()
-        
-        if not username or not email:
-            return jsonify({"error": "Username y email son requeridos"}), 400
-        
-        if not validate_username(username):
-            return jsonify({"error": "Username debe tener entre 3-50 caracteres y solo puede contener letras, números, guiones y guiones bajos"}), 400
-        
-        if not validate_email(email):
-            return jsonify({"error": "Formato de email inválido"}), 400
-        
-        if plan_type not in PLAN_CONFIG:
-            return jsonify({"error": f"Plan no válido. Opciones: {list(PLAN_CONFIG.keys())}"}), 400
-        
-        users_ref = db.collection(TOKENS_COLLECTION)
-        existing_user = users_ref.where('email', '==', email).limit(1).stream()
-        
-        if any(existing_user):
-            return jsonify({"error": "El email ya está registrado"}), 400
-        
-        plan_config = PLAN_CONFIG[plan_type]
-        daily_limit = data.get('daily_limit', plan_config['daily_limit'])
-        session_limit = data.get('session_limit', plan_config['session_limit'])
-        
-        if daily_limit <= 0 or session_limit <= 0:
-            return jsonify({"error": "Los límites deben ser mayores a 0"}), 400
-        
-        token = generate_unique_token()
-        current_time = time.time()
-        
-        user_data = {
-            'username': username,
-            'email': email,
-            'token': token,
-            'active': True,
-            'is_admin': False,
-            'plan_type': plan_type,
-            'created_at': firestore.SERVER_TIMESTAMP,
-            'last_used': None,
-            'total_usage_count': 0,
-            'daily_usage_count': 0,
-            'session_usage_count': 0,
-            'daily_reset_timestamp': current_time,
-            'session_start_timestamp': current_time,
-            'max_requests_per_day': daily_limit,
-            'max_requests_per_session': session_limit,
-            'features': plan_config['features']
-        }
-        
-        user_ref = users_ref.document()
-        user_ref.set(user_data)
-        
-        return jsonify({
-            "success": True,
-            "message": "Usuario creado exitosamente",
-            "user_info": {
-                "user_id": user_ref.id,
-                "username": username,
-                "email": email,
-                "token": token,
-                "plan_type": plan_type,
-                "limits": {
-                    "daily": daily_limit,
-                    "session": session_limit
-                },
-                "features": plan_config['features']
-            }
-        })
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/admin/users', methods=['GET'])
-@token_required
-def admin_get_users(user_data):
-    """Obtener lista de usuarios con información de planes (solo administradores)"""
-    if not user_data.get('is_admin'):
-        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
-    
-    firebase_check = check_firebase()
-    if firebase_check:
-        return firebase_check
-    
-    try:
-        users_ref = db.collection(TOKENS_COLLECTION)
-        docs = users_ref.stream()
-        
-        users = []
-        for doc in docs:
-            user_info = doc.to_dict()
-            user_info['user_id'] = doc.id
-            
-            plan_type = user_info.get('plan_type', 'free')
-            user_info['plan_type'] = plan_type
-            user_info['plan_limits'] = {
-                'daily': PLAN_CONFIG[plan_type]['daily_limit'],
-                'session': PLAN_CONFIG[plan_type]['session_limit']
-            }
-            
-            current_time = time.time()
-            daily_reset = user_info.get('daily_reset_timestamp', current_time)
-            session_start = user_info.get('session_start_timestamp', current_time)
-            
-            daily_remaining = max(0, 86400 - (current_time - daily_reset))
-            session_remaining = max(0, SESSION_TIMEOUT - (current_time - session_start))
-            
-            user_info['limits_info'] = {
-                'daily_reset_in_seconds': int(daily_remaining),
-                'session_reset_in_seconds': int(session_remaining),
-                'daily_usage': user_info.get('daily_usage_count', 0),
-                'session_usage': user_info.get('session_usage_count', 0),
-                'daily_limit': user_info.get('max_requests_per_day', PLAN_CONFIG[plan_type]['daily_limit']),
-                'session_limit': user_info.get('max_requests_per_session', PLAN_CONFIG[plan_type]['session_limit'])
-            }
-            
-            if 'token' in user_info:
-                del user_info['token']
-            users.append(user_info)
-        
-        plan_stats = {}
-        for user in users:
-            plan = user.get('plan_type', 'free')
-            plan_stats[plan] = plan_stats.get(plan, 0) + 1
-        
-        return jsonify({
-            "success": True,
-            "count": len(users),
-            "plan_statistics": plan_stats,
-            "users": users
-        })
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# Endpoints para usuarios normales
-@app.route('/api/user/info', methods=['GET'])
-@token_required
-def get_user_info(user_data):
-    """Obtener información del usuario actual con detalles del plan"""
-    firebase_check = check_firebase()
-    if firebase_check:
-        return firebase_check
-    
-    if not user_data.get('is_admin'):
-        try:
-            user_ref = db.collection(TOKENS_COLLECTION).document(user_data['user_id'])
-            user_doc = user_ref.get()
-            if user_doc.exists:
-                current_data = user_doc.to_dict()
-                user_data.update(current_data)
-        except Exception as e:
-            print(f"Error obteniendo información actualizada: {e}")
-    
-    current_time = time.time()
-    daily_reset = user_data.get('daily_reset_timestamp', current_time)
-    session_start = user_data.get('session_start_timestamp', current_time)
-    
-    daily_remaining = max(0, 86400 - (current_time - daily_reset))
-    session_remaining = max(0, SESSION_TIMEOUT - (current_time - session_start))
-    
-    plan_type = user_data.get('plan_type', 'free')
-    plan_features = PLAN_CONFIG[plan_type]['features']
-    
-    user_response = {
-        "user_id": user_data.get('user_id'),
-        "username": user_data.get('username'),
-        "email": user_data.get('email'),
-        "active": user_data.get('active', True),
-        "is_admin": user_data.get('is_admin', False),
-        "plan_type": plan_type,
-        "created_at": user_data.get('created_at'),
-        "usage_stats": {
-            "total": user_data.get('total_usage_count', 0),
-            "daily": user_data.get('daily_usage_count', 0),
-            "session": user_data.get('session_usage_count', 0),
-            "daily_limit": user_data.get('max_requests_per_day', PLAN_CONFIG[plan_type]['daily_limit']),
-            "session_limit": user_data.get('max_requests_per_session', PLAN_CONFIG[plan_type]['session_limit']),
-            "daily_reset_in": f"{int(daily_remaining // 3600)}h {int((daily_remaining % 3600) // 60)}m",
-            "session_reset_in": f"{int(session_remaining // 60)}m {int(session_remaining % 60)}s"
-        },
-        "features": plan_features
-    }
-    
-    return jsonify({
-        "success": True,
-        "user": user_response
     })
 
 # Endpoint principal (requiere token)
@@ -1269,13 +1097,12 @@ def home(user_data):
         except Exception as e:
             print(f"Error obteniendo información de límites: {e}")
     
-    return jsonify({
+    response_data = {
         "message": f"🎬 API de Streaming - {welcome_msg}",
         "version": "2.0.0",
         "user": user_data.get('username'),
         "plan_type": user_data.get('plan_type', 'free'),
         "firebase_status": "✅ Conectado",
-        "token_mode": TOKEN_ACTUAL,
         "usage_limits": limits_info,
         "endpoints_available": {
             "user_info": "GET /api/user/info",
@@ -1290,64 +1117,13 @@ def home(user_data):
             "stream": "GET /api/stream/<id> (solo premium)",
             "public_content": "GET /public/content (token admin)"
         }
-    })
-
-# Endpoints de contenido (todos requieren token)
-@app.route('/api/peliculas', methods=['GET'])
-@token_required
-def get_peliculas(user_data):
-    """Obtener todas las películas con paginación y restricciones por plan"""
-    firebase_check = check_firebase()
-    if firebase_check:
-        return firebase_check
+    }
     
-    try:
-        limit = int(request.args.get('limit', 20))
-        page = int(request.args.get('page', 1))
-        
-        plan_type = user_data.get('plan_type', 'free')
-        plan_config = PLAN_CONFIG[plan_type]
-        
-        if plan_type == 'free':
-            limit = min(limit, 10)
-            max_offset = 50
-        else:
-            max_offset = 1000
-        
-        peliculas_ref = db.collection('peliculas')
-        
-        offset = (page - 1) * limit
-        if plan_type == 'free' and offset >= max_offset:
-            return jsonify({
-                "success": True,
-                "count": 0,
-                "message": "Límite de contenido gratuito alcanzado. Actualiza a premium para acceso completo.",
-                "data": []
-            })
-        
-        docs = peliculas_ref.limit(limit).offset(offset).stream()
-        
-        peliculas = []
-        for doc in docs:
-            pelicula_data = doc.to_dict()
-            pelicula_data['id'] = doc.id
-            
-            if plan_type == 'free':
-                pelicula_data = limit_content_info(pelicula_data, 'pelicula')
-            
-            peliculas.append(pelicula_data)
-        
-        return jsonify({
-            "success": True,
-            "count": len(peliculas),
-            "page": page,
-            "limit": limit,
-            "plan_restrictions": plan_type == 'free',
-            "data": peliculas
-        })
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    # Solo mostrar información de tokens si es admin
+    if user_data.get('is_admin'):
+        response_data["token_info"] = get_token_info()
+    
+    return jsonify(response_data)
 
 # Script para generar tokens pre-hasheados
 def generate_hashed_tokens():
@@ -1360,19 +1136,19 @@ def generate_hashed_tokens():
     
     token_hash = hashlib.sha256(production_token.encode()).hexdigest()
     
-    print("📋 TOKEN DE PRODUCCIÓN:")
-    print(f"Token original: {production_token}")
-    print(f"Hash:           {token_hash}")
+    print("📋 INFORMACIÓN COMPLETA DE TOKENS:")
+    print(f"🔑 Token ORIGINAL (para usar): {production_token}")
+    print(f"🔐 Hash (para configurar):     {token_hash}")
     print("-" * 50)
     
-    print("\n🎯 VARIABLE PARA RENDER.COM:")
+    print("\n🎯 CONFIGURACIÓN PARA RENDER.COM:")
     print(f"ADMIN_TOKENS_HASHED={token_hash}")
-    print("\n💡 Instrucciones:")
-    print("1. Usa el token original en tu código/cliente")
-    print("2. Configura la variable anterior en Render.com")
-    print("3. La API detectará automáticamente modo producción")
-    print("\n🔧 Para desarrollo:")
-    print("No configures ADMIN_TOKENS_HASHED y usará token por defecto")
+    print("\n💡 INSTRUCCIONES:")
+    print("1. ✅ Usa el token ORIGINAL en tus requests:")
+    print("   Authorization: Bearer mi_token_produccion_2024")
+    print("2. ⚙️  Configura el HASH en Render.com:")
+    print("   ADMIN_TOKENS_HASHED=el_hash_que_se_muestra_arriba")
+    print("3. 🔄 La API mostrará AMBOS tokens cuando accedas como admin")
 
 # Manejo de errores
 @app.errorhandler(404)
