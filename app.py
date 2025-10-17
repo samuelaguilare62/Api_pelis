@@ -10,6 +10,8 @@ import threading
 from collections import defaultdict
 import re
 import requests
+import hashlib
+import hmac
 
 # Inicializar Flask
 app = Flask(__name__)
@@ -25,8 +27,56 @@ EMAIL_CONFIG = {
     'service_enabled': True  # Siempre habilitado, usa método sin autenticación
 }
 
-# Configuración de administrador - AHORA CON VARIABLE DE ENTORNO
-ADMIN_TOKENS = [os.environ.get('ADMIN_TOKEN', 'admin_token_secreto_2024')]
+# MEJORA 1: SISTEMA DE TOKENS PRE-HASHEADOS PARA MÁXIMA SEGURIDAD
+ADMIN_TOKENS_HASH = set()
+PUBLIC_TOKENS_HASH = set()
+
+def initialize_tokens():
+    """Inicializar tokens pre-hasheados para admin y endpoints públicos"""
+    global ADMIN_TOKENS_HASH, PUBLIC_TOKENS_HASH
+    
+    # 1. Tokens de administrador (acceso completo)
+    admin_tokens_hashed = os.environ.get('ADMIN_TOKENS_HASHED', '')
+    if admin_tokens_hashed:
+        hashes = [h.strip() for h in admin_tokens_hashed.split(',') if h.strip()]
+        ADMIN_TOKENS_HASH.update(hashes)
+        print(f"✅ {len(ADMIN_TOKENS_HASH)} tokens de admin cargados (pre-hasheados)")
+    else:
+        # Token por defecto para desarrollo (NUNCA en producción)
+        default_token = 'admin_token_secreto_2024'
+        default_hash = hashlib.sha256(default_token.encode()).hexdigest()
+        ADMIN_TOKENS_HASH.add(default_hash)
+        print("⚠️  MODO DESARROLLO: Usando token de admin por defecto")
+    
+    # 2. Tokens para endpoints públicos (acceso limitado solo a /public/)
+    public_tokens_hashed = os.environ.get('PUBLIC_TOKENS_HASHED', '')
+    if public_tokens_hashed:
+        hashes = [h.strip() for h in public_tokens_hashed.split(',') if h.strip()]
+        PUBLIC_TOKENS_HASH.update(hashes)
+        print(f"✅ {len(PUBLIC_TOKENS_HASH)} tokens públicos cargados (pre-hasheados)")
+    else:
+        # Token público por defecto para desarrollo
+        public_token = 'public_token_acceso_2024'
+        public_hash = hashlib.sha256(public_token.encode()).hexdigest()
+        PUBLIC_TOKENS_HASH.add(public_hash)
+        print("⚠️  MODO DESARROLLO: Usando token público por defecto")
+
+def verify_admin_token(token):
+    """Verificar token de admin usando hash seguro"""
+    if not token:
+        return False
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    return token_hash in ADMIN_TOKENS_HASH
+
+def verify_public_token(token):
+    """Verificar token para endpoints públicos"""
+    if not token:
+        return False
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    return token_hash in PUBLIC_TOKENS_HASH
+
+# Inicializar tokens al inicio
+initialize_tokens()
 
 # Configuración de Firebase - SOLO VARIABLES DE ENTORNO
 def initialize_firebase():
@@ -140,26 +190,32 @@ request_lock = threading.Lock()
 ip_request_times = defaultdict(list)
 ip_lock = threading.Lock()
 
+# Rate limiting para endpoints públicos
+public_request_times = defaultdict(list)
+public_lock = threading.Lock()
+
 # Configuración de seguridad
 MAX_REQUESTS_PER_MINUTE_PER_IP = 100
 MAX_REQUESTS_PER_MINUTE_PER_USER = 60
+MAX_REQUESTS_PER_MINUTE_PUBLIC = 200  # Límite más alto para endpoints públicos
 
-# FUNCIÓN MEJORADA PARA ENVÍO DE EMAILS SIN SMTP
+# MEJORA 2: SISTEMA MEJORADO DE ENVÍO DE CORREOS
 def send_email_async(to_email, subject, message):
-    """Enviar email en segundo plano usando servicio sin autenticación"""
+    """Enviar email en segundo plano usando servicio sin autenticación - MEJORADO"""
     def send_email():
         try:
-            # MÉTODO 1: Usar Webhook.email (servicio gratuito sin autenticación)
-            webhook_url = "https://webhook.email/inbound/your-unique-id"
+            print(f"📧 Intentando enviar email a: {to_email}")
             
-            email_data = {
-                "to": to_email,
-                "subject": subject,
-                "html": message,
-                "from": "notifications@yourapi.com"
-            }
-            
+            # MÉTODO 1: Usar Webhook.site como webhook temporal
             try:
+                webhook_url = "https://webhook.site/unique-id-aqui"  # Reemplaza con tu webhook
+                email_data = {
+                    "to": to_email,
+                    "subject": subject,
+                    "html": message,
+                    "from": "notifications@streamingapi.com"
+                }
+                
                 response = requests.post(
                     webhook_url,
                     json=email_data,
@@ -168,40 +224,50 @@ def send_email_async(to_email, subject, message):
                 )
                 
                 if response.status_code == 200:
-                    print(f"✅ Email enviado exitosamente a: {to_email}")
+                    print(f"✅ Email enviado exitosamente a: {to_email} (vía Webhook)")
                     return
                 else:
-                    print(f"⚠️  Webhook.email falló, usando método alternativo")
+                    print(f"⚠️  Webhook falló con código: {response.status_code}")
             except Exception as e:
-                print(f"⚠️  Error con webhook.email: {e}")
+                print(f"⚠️  Error con webhook: {e}")
             
-            # MÉTODO 2: Usar Formspree (alternativa gratuita)
+            # MÉTODO 2: Usar servicio de email transaccional gratuito (Mailtrap, etc.)
             try:
-                formspree_data = {
-                    "_replyto": to_email,
-                    "_subject": subject,
-                    "message": message,
-                    "email": to_email
+                # Configuración para servicio de email gratuito
+                email_service_url = "https://api.mailersend.com/v1/email"  # Ejemplo
+                email_payload = {
+                    "from": {"email": "noreply@streamingapi.com", "name": "API Streaming"},
+                    "to": [{"email": to_email}],
+                    "subject": subject,
+                    "html": message
                 }
                 
                 response = requests.post(
-                    "https://formspree.io/f/your-form-id",
-                    data=formspree_data,
+                    email_service_url,
+                    json=email_payload,
+                    headers={
+                        'Content-Type': 'application/json',
+                        'Authorization': f"Bearer {os.environ.get('MAILERSEND_TOKEN', '')}"
+                    },
                     timeout=10
                 )
                 
-                if response.status_code == 200:
-                    print(f"✅ Email enviado vía Formspree a: {to_email}")
+                if response.status_code in [200, 202]:
+                    print(f"✅ Email enviado exitosamente a: {to_email} (vía servicio)")
                     return
+                else:
+                    print(f"⚠️  Servicio de email falló: {response.status_code}")
             except Exception as e:
-                print(f"⚠️  Error con Formspree: {e}")
+                print(f"⚠️  Error con servicio de email: {e}")
             
-            # MÉTODO 3: Log para debugging (si fallan los métodos anteriores)
-            print(f"📧 [SIMULACIÓN] Email para {to_email}: {subject}")
-            print(f"📧 [SIMULACIÓN] Mensaje: {message[:100]}...")
+            # MÉTODO 3: Log detallado para debugging (si fallan los métodos anteriores)
+            print(f"📧 [EMAIL SIMULADO] Para: {to_email}")
+            print(f"📧 [EMAIL SIMULADO] Asunto: {subject}")
+            print(f"📧 [EMAIL SIMULADO] Mensaje: {message[:200]}...")
+            print("💡 Configure un servicio de email real para envíos automáticos")
             
         except Exception as e:
-            print(f"❌ Error enviando email a {to_email}: {e}")
+            print(f"❌ Error crítico enviando email a {to_email}: {e}")
     
     # Ejecutar en segundo plano
     thread = threading.Thread(target=send_email)
@@ -210,7 +276,7 @@ def send_email_async(to_email, subject, message):
 
 # FUNCIÓN MEJORADA PARA NOTIFICAR LÍMITES ALCANZADOS
 def notify_limit_reached(user_data, limit_type, current_usage, limit, reset_time):
-    """Notificar automáticamente al usuario que alcanzó un límite usando su email registrado"""
+    """Notificar automáticamente al usuario que alcanzó un límite - MEJORADO"""
     try:
         user_email = user_data.get('email')
         username = user_data.get('username', 'Usuario')
@@ -218,7 +284,7 @@ def notify_limit_reached(user_data, limit_type, current_usage, limit, reset_time
         
         if not user_email:
             print("⚠️  No se puede notificar: usuario sin email")
-            return
+            return False
         
         print(f"📧 Preparando notificación para {user_email} - Límite: {limit_type}")
         
@@ -359,7 +425,7 @@ def notify_limit_reached(user_data, limit_type, current_usage, limit, reset_time
             </html>
             """
         
-        # Enviar email en segundo plano - FUNCIONA AUTOMÁTICAMENTE
+        # Enviar email en segundo plano - MEJORADO
         send_email_async(user_email, subject, message)
         
         print(f"✅ Notificación de {limit_type} enviada a {user_email}")
@@ -381,9 +447,12 @@ def notify_limit_reached(user_data, limit_type, current_usage, limit, reset_time
             </html>
             """
             send_email_async(EMAIL_CONFIG['admin_email'], admin_subject, admin_message)
+        
+        return True
             
     except Exception as e:
         print(f"❌ Error en notificación de límite: {e}")
+        return False
 
 # Decorador para verificar Firebase
 def check_firebase():
@@ -419,6 +488,33 @@ def check_ip_rate_limit(ip_address):
         
         # Agregar nuevo request
         ip_request_times[ip_address].append(current_time)
+    
+    return None
+
+# Rate limiting para endpoints públicos
+def check_public_rate_limit(ip_address):
+    """Rate limiting específico para endpoints públicos"""
+    current_time = time.time()
+    
+    with public_lock:
+        # Limpiar requests antiguos
+        public_request_times[ip_address] = [
+            req_time for req_time in public_request_times[ip_address] 
+            if current_time - req_time < 60
+        ]
+        
+        # Verificar rate limit
+        if len(public_request_times[ip_address]) >= MAX_REQUESTS_PER_MINUTE_PUBLIC:
+            return {
+                "error": "Límite de requests por minuto excedido para endpoints públicos",
+                "limit_type": "public_rate_limit",
+                "current_usage": len(public_request_times[ip_address]),
+                "limit": MAX_REQUESTS_PER_MINUTE_PUBLIC,
+                "wait_time": 60
+            }, 429
+        
+        # Agregar nuevo request
+        public_request_times[ip_address].append(current_time)
     
     return None
 
@@ -458,7 +554,7 @@ def check_user_rate_limit(user_data):
 
 # Función para verificar y actualizar límites de uso
 def check_usage_limits(user_data):
-    """Verificar límites de uso diario, por sesión y rate limiting"""
+    """Verificar límites de uso diario, por sesión y rate limiting - MEJORADO"""
     if user_data.get('is_admin'):
         return None  # Admin no tiene límites
     
@@ -470,14 +566,16 @@ def check_usage_limits(user_data):
         # Primero verificar rate limits
         rate_limit_check = check_user_rate_limit(user_data)
         if rate_limit_check:
-            # Notificar al usuario sobre rate limit
-            notify_limit_reached(
+            # Notificar al usuario sobre rate limit - MEJORADO
+            notification_sent = notify_limit_reached(
                 user_data, 
                 'rate_limit', 
                 rate_limit_check[0]['current_usage'], 
                 rate_limit_check[0]['limit'],
                 '1 minuto'
             )
+            if notification_sent:
+                print(f"📧 Notificación de rate limit enviada para usuario {user_id}")
             return rate_limit_check
         
         user_ref = db.collection(TOKENS_COLLECTION).document(user_id)
@@ -492,8 +590,8 @@ def check_usage_limits(user_data):
         plan_config = PLAN_CONFIG[plan_type]
         
         # Obtener límites del plan
-        daily_limit = plan_config['daily_limit']
-        session_limit = plan_config['session_limit']
+        daily_limit = user_info.get('max_requests_per_day', plan_config['daily_limit'])
+        session_limit = user_info.get('max_requests_per_session', plan_config['session_limit'])
         
         # Inicializar contadores si no existen
         update_data = {}
@@ -504,6 +602,7 @@ def check_usage_limits(user_data):
             update_data['daily_usage_count'] = 0
             update_data['daily_reset_timestamp'] = current_time
             daily_usage = 0
+            print(f"🔄 Reset diario para usuario {user_id}")
         else:
             daily_usage = user_info.get('daily_usage_count', 0)
         
@@ -513,6 +612,7 @@ def check_usage_limits(user_data):
             update_data['session_usage_count'] = 0
             update_data['session_start_timestamp'] = current_time
             session_usage = 0
+            print(f"🔄 Reset de sesión para usuario {user_id}")
         else:
             session_usage = user_info.get('session_usage_count', 0)
         
@@ -521,30 +621,36 @@ def check_usage_limits(user_data):
             time_remaining = 86400 - (current_time - last_reset)
             reset_time = f"{int(time_remaining // 3600)}h {int((time_remaining % 3600) // 60)}m"
             
-            # Notificar al usuario AUTOMÁTICAMENTE
-            notify_limit_reached(user_data, 'daily', daily_usage, daily_limit, reset_time)
+            # Notificar al usuario AUTOMÁTICAMENTE - MEJORADO
+            notification_sent = notify_limit_reached(user_data, 'daily', daily_usage, daily_limit, reset_time)
+            if notification_sent:
+                print(f"📧 Notificación de límite diario enviada para usuario {user_id}")
             
             return {
                 "error": f"Límite diario excedido ({daily_usage}/{daily_limit})",
                 "limit_type": "daily",
                 "current_usage": daily_usage,
                 "limit": daily_limit,
-                "reset_in": reset_time
+                "reset_in": reset_time,
+                "notification_sent": notification_sent
             }, 429
         
         if session_usage >= session_limit:
             time_remaining = SESSION_TIMEOUT - (current_time - session_start)
             reset_time = f"{int(time_remaining // 60)}m {int(time_remaining % 60)}s"
             
-            # Notificar al usuario AUTOMÁTICAMENTE
-            notify_limit_reached(user_data, 'session', session_usage, session_limit, reset_time)
+            # Notificar al usuario AUTOMÁTICAMENTE - MEJORADO
+            notification_sent = notify_limit_reached(user_data, 'session', session_usage, session_limit, reset_time)
+            if notification_sent:
+                print(f"📧 Notificación de límite de sesión enviada para usuario {user_id}")
             
             return {
                 "error": f"Límite de sesión excedido ({session_usage}/{session_limit})",
                 "limit_type": "session", 
                 "current_usage": session_usage,
                 "limit": session_limit,
-                "reset_in": reset_time
+                "reset_in": reset_time,
+                "notification_sent": notification_sent
             }, 429
         
         # Actualizar contadores
@@ -599,11 +705,17 @@ def limit_content_info(content_data, content_type):
 @app.before_request
 def before_request():
     """Middleware de seguridad global"""
-    # Verificar rate limiting por IP
+    # Verificar rate limiting por IP para TODAS las rutas
     ip_address = request.remote_addr
     ip_limit_check = check_ip_rate_limit(ip_address)
     if ip_limit_check:
         return jsonify(ip_limit_check[0]), ip_limit_check[1]
+    
+    # Rate limiting específico para endpoints públicos
+    if request.path.startswith('/public/'):
+        public_limit_check = check_public_rate_limit(ip_address)
+        if public_limit_check:
+            return jsonify(public_limit_check[0]), public_limit_check[1]
     
     # Validar headers de seguridad
     if request.endpoint and request.endpoint != 'diagnostic':
@@ -631,7 +743,67 @@ def after_request(response):
     
     return response
 
-# Decorador para requerir autenticación
+# Decorador para requerir autenticación de admin
+def admin_token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        
+        # Buscar token en headers Authorization
+        if 'Authorization' in request.headers:
+            auth_header = request.headers['Authorization']
+            try:
+                token = auth_header.split(" ")[1]
+            except IndexError:
+                pass
+        
+        if not token:
+            return jsonify({"error": "Token de administrador requerido"}), 401
+        
+        # Validar formato del token
+        if len(token) < 10 or len(token) > 500:
+            return jsonify({"error": "Formato de token inválido"}), 401
+        
+        # Verificar token de admin
+        if not verify_admin_token(token):
+            return jsonify({"error": "Token de administrador inválido"}), 401
+        
+        # Si es válido, continuar
+        return f(*args, **kwargs)
+    
+    return decorated
+
+# Decorador para requerir autenticación pública
+def public_token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        
+        # Buscar token en headers Authorization
+        if 'Authorization' in request.headers:
+            auth_header = request.headers['Authorization']
+            try:
+                token = auth_header.split(" ")[1]
+            except IndexError:
+                pass
+        
+        if not token:
+            return jsonify({"error": "Token de acceso público requerido"}), 401
+        
+        # Validar formato del token
+        if len(token) < 10 or len(token) > 500:
+            return jsonify({"error": "Formato de token inválido"}), 401
+        
+        # Verificar token público
+        if not verify_public_token(token):
+            return jsonify({"error": "Token de acceso público inválido"}), 401
+        
+        # Si es válido, continuar
+        return f(*args, **kwargs)
+    
+    return decorated
+
+# Decorador para requerir autenticación (usuarios normales)
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -657,8 +829,8 @@ def token_required(f):
             return jsonify({"error": "Formato de token inválido"}), 401
         
         try:
-            # Verificar si es token de admin
-            if token in ADMIN_TOKENS:
+            # MEJORA 1: Verificar si es token de admin usando hash seguro
+            if verify_admin_token(token):
                 user_data = {
                     'user_id': 'admin',
                     'username': 'Administrador',
@@ -741,6 +913,252 @@ def validate_username(username):
     pattern = r'^[a-zA-Z0-9_-]+$'
     return re.match(pattern, username) is not None
 
+# MEJORA 3: ENDPOINTS PÚBLICOS CON ACCESO COMPLETO
+@app.route('/public/content', methods=['GET'])
+@public_token_required
+def public_all_content():
+    """Endpoint público que devuelve TODO el contenido en una sola respuesta"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    try:
+        # Obtener todas las películas
+        peliculas_ref = db.collection('peliculas')
+        peliculas_docs = peliculas_ref.limit(1000).stream()
+        peliculas = []
+        for doc in peliculas_docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            data['tipo'] = 'pelicula'
+            peliculas.append(data)
+        
+        # Obtener todas las series
+        series_ref = db.collection('contenido')
+        series_docs = series_ref.limit(1000).stream()
+        series = []
+        for doc in series_docs:
+            data = doc.to_dict()
+            if 'seasons' in data:
+                data['id'] = doc.id
+                data['tipo'] = 'serie'
+                series.append(data)
+        
+        # Obtener todos los canales
+        canales_ref = db.collection('canales')
+        canales_docs = canales_ref.limit(1000).stream()
+        canales = []
+        for doc in canales_docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            data['tipo'] = 'canal'
+            canales.append(data)
+        
+        # Estadísticas
+        estadisticas = {
+            "total_peliculas": len(peliculas),
+            "total_series": len(series),
+            "total_canales": len(canales),
+            "total_contenido": len(peliculas) + len(series) + len(canales),
+            "timestamp": time.time()
+        }
+        
+        return jsonify({
+            "success": True,
+            "estadisticas": estadisticas,
+            "contenido": {
+                "peliculas": peliculas,
+                "series": series, 
+                "canales": canales
+            },
+            "metadata": {
+                "version": "1.0.0",
+                "endpoint": "public",
+                "cache_recomendado": 300  # 5 minutos
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error en endpoint público: {e}")
+        return jsonify({
+            "success": False,
+            "error": f"Error obteniendo contenido: {str(e)}"
+        }), 500
+
+@app.route('/public/peliculas', methods=['GET'])
+@public_token_required
+def public_peliculas():
+    """Endpoint público para todas las películas"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    try:
+        limit = int(request.args.get('limit', 100))
+        page = int(request.args.get('page', 1))
+        offset = (page - 1) * limit
+        
+        peliculas_ref = db.collection('peliculas')
+        docs = peliculas_ref.limit(limit).offset(offset).stream()
+        
+        peliculas = []
+        for doc in docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            peliculas.append(data)
+        
+        return jsonify({
+            "success": True,
+            "count": len(peliculas),
+            "page": page,
+            "limit": limit,
+            "data": peliculas
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/public/series', methods=['GET'])
+@public_token_required
+def public_series():
+    """Endpoint público para todas las series"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    try:
+        series_ref = db.collection('contenido')
+        docs = series_ref.limit(1000).stream()
+        
+        series = []
+        for doc in docs:
+            data = doc.to_dict()
+            if 'seasons' in data:
+                data['id'] = doc.id
+                series.append(data)
+        
+        return jsonify({
+            "success": True,
+            "count": len(series),
+            "data": series
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/public/canales', methods=['GET'])
+@public_token_required
+def public_canales():
+    """Endpoint público para todos los canales"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    try:
+        canales_ref = db.collection('canales')
+        docs = canales_ref.limit(1000).stream()
+        
+        canales = []
+        for doc in docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            canales.append(data)
+        
+        return jsonify({
+            "success": True,
+            "count": len(canales),
+            "data": canales
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/public/estadisticas', methods=['GET'])
+@public_token_required
+def public_estadisticas():
+    """Endpoint público para estadísticas"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    try:
+        # Contar películas
+        peliculas_count = len(list(db.collection('peliculas').limit(1000).stream()))
+        
+        # Contar series
+        series_ref = db.collection('contenido')
+        series_docs = series_ref.limit(1000).stream()
+        series_count = 0
+        for doc in series_docs:
+            if 'seasons' in doc.to_dict():
+                series_count += 1
+        
+        # Contar canales
+        canales_count = len(list(db.collection('canales').limit(1000).stream()))
+        
+        return jsonify({
+            "success": True,
+            "data": {
+                "total_peliculas": peliculas_count,
+                "total_series": series_count,
+                "total_canales": canales_count,
+                "total_contenido": peliculas_count + series_count + canales_count,
+                "ultima_actualizacion": time.time()
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/public/search', methods=['GET'])
+@public_token_required
+def public_search():
+    """Búsqueda pública en todo el contenido"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    try:
+        query = request.args.get('q', '').strip()
+        if not query:
+            return jsonify({"error": "Parámetro de búsqueda 'q' requerido"}), 400
+        
+        resultados = []
+        search_term = query.lower()
+        
+        # Buscar en películas
+        peliculas_ref = db.collection('peliculas')
+        peliculas_docs = peliculas_ref.limit(100).stream()
+        for doc in peliculas_docs:
+            data = doc.to_dict()
+            if (search_term in data.get('title', '').lower() or 
+                search_term in data.get('genre', '').lower() or
+                search_term in data.get('description', '').lower()):
+                data['id'] = doc.id
+                data['tipo'] = 'pelicula'
+                resultados.append(data)
+        
+        # Buscar en series
+        series_ref = db.collection('contenido')
+        series_docs = series_ref.limit(100).stream()
+        for doc in series_docs:
+            data = doc.to_dict()
+            if 'seasons' in data and (search_term in data.get('title', '').lower() or 
+                                    search_term in data.get('genre', '').lower()):
+                data['id'] = doc.id
+                data['tipo'] = 'serie'
+                resultados.append(data)
+        
+        return jsonify({
+            "success": True,
+            "query": query,
+            "count": len(resultados),
+            "data": resultados
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # Endpoint de diagnóstico
 @app.route('/api/diagnostic', methods=['GET'])
 def diagnostic():
@@ -753,8 +1171,14 @@ def diagnostic():
         'FIREBASE_PROJECT_ID': "✅" if os.environ.get('FIREBASE_PROJECT_ID') else "❌", 
         'FIREBASE_PRIVATE_KEY': "✅" if os.environ.get('FIREBASE_PRIVATE_KEY') else "❌",
         'FIREBASE_CLIENT_EMAIL': "✅" if os.environ.get('FIREBASE_CLIENT_EMAIL') else "❌",
-        'ADMIN_EMAIL': "✅" if os.environ.get('ADMIN_EMAIL') else "❌",
-        'ADMIN_TOKEN': "✅" if os.environ.get('ADMIN_TOKEN') else "❌"
+        'ADMIN_EMAIL': "✅" if os.environ.get('ADMIN_EMAIL') else "❌"
+    }
+    
+    # Información de tokens
+    token_info = {
+        'admin_tokens_cargados': len(ADMIN_TOKENS_HASH),
+        'public_tokens_cargados': len(PUBLIC_TOKENS_HASH),
+        'tokens_prehasheados': True
     }
     
     # Probar operación de Firestore si está conectado
@@ -775,20 +1199,23 @@ def diagnostic():
             "firebase_status": firebase_status,
             "firestore_test": firestore_test,
             "project_id": "phdt-b9b2c",
-            "environment_variables": env_vars
+            "environment_variables": env_vars,
+            "token_security": token_info
         },
         "security": {
             "rate_limiting": "✅ Activado",
-            "ip_restrictions": "✅ Activado",
+            "ip_restrictions": "✅ Activado", 
             "token_authentication": "✅ Activado",
             "plan_restrictions": "✅ Activado",
-            "email_notifications": "✅ Activado"
+            "email_notifications": "✅ Activado",
+            "tokens_prehasheados": "✅ Activado"
         },
         "endpoints_working": {
             "diagnostic": "✅ /api/diagnostic",
             "home": "🔒 / (requiere token)",
             "admin": "🔒 /api/admin/* (requiere admin token)",
-            "content": "🔒 /api/* (requiere token)"
+            "content": "🔒 /api/* (requiere token)",
+            "public": "🔒 /public/* (requiere public token)"
         }
     })
 
@@ -1410,7 +1837,8 @@ def home(user_data):
             "canal_especifico": "GET /api/canales/<id>",
             "buscar": "GET /api/buscar?q=<termino>",
             "estadisticas": "GET /api/estadisticas",
-            "stream": "GET /api/stream/<id> (solo premium)"
+            "stream": "GET /api/stream/<id> (solo premium)",
+            "public_content": "GET /public/content (token público)"
         },
         "admin_endpoints": {
             "create_user": "POST /api/admin/create-user",
@@ -1782,6 +2210,54 @@ def internal_error(error):
 def too_large(error):
     return jsonify({"error": "Archivo demasiado grande"}), 413
 
+# Script para generar tokens pre-hasheados
+def generate_hashed_tokens():
+    """Función para generar tokens pre-hasheados (ejecutar una vez)"""
+    print("🔐 GENERADOR DE TOKENS PRE-HASHEADOS")
+    print("=" * 50)
+    
+    # Tokens originales (cambia estos por los que quieras usar)
+    admin_tokens = [
+        "admin_token_principal_2024",
+        "admin_token_backup_2024"
+    ]
+    
+    public_tokens = [
+        "public_netlify_token_2024",
+        "public_backup_token_2024"
+    ]
+    
+    print("\n📋 TOKENS DE ADMINISTRADOR:")
+    admin_hashes = []
+    for token in admin_tokens:
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        admin_hashes.append(token_hash)
+        print(f"Original: {token}")
+        print(f"Hash:     {token_hash}")
+        print("-" * 30)
+    
+    print("\n🌐 TOKENS PÚBLICOS:")
+    public_hashes = []
+    for token in public_tokens:
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        public_hashes.append(token_hash)
+        print(f"Original: {token}")
+        print(f"Hash:     {token_hash}")
+        print("-" * 30)
+    
+    print("\n🎯 VARIABLES DE ENTORNO PARA RENDER.COM:")
+    print(f"ADMIN_TOKENS_HASHED={','.join(admin_hashes)}")
+    print(f"PUBLIC_TOKENS_HASHED={','.join(public_hashes)}")
+    print("\n💡 Copia estas variables a Render.com > Environment")
+
 # Inicialización de la aplicación
 if __name__ == '__main__':
+    print("🚀 Iniciando API Streaming Mejorada...")
+    print("🔐 Sistema de tokens pre-hasheados activado")
+    print("🌐 Endpoints públicos disponibles en /public/")
+    print("📧 Sistema de notificaciones mejorado")
+    
+    # Para generar tokens: descomenta la línea siguiente y ejecuta una vez
+    # generate_hashed_tokens()
+    
     app.run(debug=False, host='0.0.0.0', port=5000)
