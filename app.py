@@ -570,6 +570,110 @@ def get_optimized_image_url(image_url, plan_type='free'):
         print(f"❌ Error en optimización de imagen: {e}")
         return image_url  # Fallback a original
 
+# FUNCIONES PARA NORMALIZAR DATOS DE LA BASE DE DATOS
+def normalize_movie_data(movie_data, doc_id=None):
+    """Normalizar datos de película desde la estructura de BD a la esperada por la API"""
+    if doc_id:
+        movie_data['id'] = doc_id
+    
+    normalized = {
+        'id': movie_data.get('id'),
+        'title': movie_data.get('title', ''),
+        'poster': movie_data.get('image_url', ''),  # image_url → poster
+        'description': movie_data.get('sinopsis', ''),  # sinopsis → description
+        'year': movie_data.get('details', {}).get('year', '') if movie_data.get('details') else movie_data.get('year', ''),
+        'genre': ', '.join(movie_data.get('details', {}).get('genres', [])) if movie_data.get('details') and movie_data.get('details', {}).get('genres') else movie_data.get('genre', ''),
+        'rating': movie_data.get('details', {}).get('rating', '') if movie_data.get('details') else movie_data.get('rating', ''),
+        # Campos adicionales de la BD
+        'original_title': movie_data.get('original_title', ''),
+        'actors': movie_data.get('details', {}).get('actors', []) if movie_data.get('details') else [],
+        'duration': movie_data.get('details', {}).get('duration', '') if movie_data.get('details') else '',
+        'director': movie_data.get('details', {}).get('director', '') if movie_data.get('details') else '',
+        'play_links': movie_data.get('play_links', [])
+    }
+    
+    # Limpiar campos vacíos
+    return {k: v for k, v in normalized.items() if v not in [None, '', [], {}]}
+
+def normalize_series_data(series_data, doc_id=None):
+    """Normalizar datos de serie desde la estructura de BD a la esperada por la API"""
+    if doc_id:
+        series_data['id'] = doc_id
+    
+    normalized = {
+        'id': series_data.get('id'),
+        'title': series_data.get('title', ''),
+        'poster': series_data.get('image_url', ''),  # image_url → poster
+        'description': series_data.get('sinopsis', ''),  # sinopsis → description
+        'year': series_data.get('details', {}).get('year', '') if series_data.get('details') else series_data.get('year', ''),
+        'genre': ', '.join(series_data.get('details', {}).get('genres', [])) if series_data.get('details') and series_data.get('details', {}).get('genres') else series_data.get('genre', ''),
+        'rating': series_data.get('details', {}).get('rating', '') if series_data.get('details') else series_data.get('rating', ''),
+        # Campos específicos de series
+        'total_seasons': series_data.get('details', {}).get('total_seasons', 0) if series_data.get('details') else 0,
+        'status': series_data.get('details', {}).get('status', '') if series_data.get('details') else '',
+        'seasons': normalize_seasons_data(series_data.get('seasons', {}))
+    }
+    
+    # Limpiar campos vacíos
+    return {k: v for k, v in normalized.items() if v not in [None, '', [], {}, 0]}
+
+def normalize_seasons_data(seasons_dict):
+    """Normalizar estructura de temporadas"""
+    if not seasons_dict:
+        return []
+    
+    normalized_seasons = []
+    
+    for season_key, season_data in seasons_dict.items():
+        if isinstance(season_data, dict):
+            season = {
+                'season_number': season_data.get('season_number', 0),
+                'episode_count': season_data.get('episode_count', 0),
+                'year': season_data.get('year', ''),
+                'episodes': normalize_episodes_data(season_data.get('episodes', {}))
+            }
+            normalized_seasons.append(season)
+    
+    return normalized_seasons
+
+def normalize_episodes_data(episodes_dict):
+    """Normalizar estructura de episodios"""
+    if not episodes_dict:
+        return []
+    
+    normalized_episodes = []
+    
+    for episode_key, episode_data in episodes_dict.items():
+        if isinstance(episode_data, dict):
+            episode = {
+                'episode_number': episode_data.get('episode_number', 0),
+                'title': episode_data.get('title', ''),
+                'duration': episode_data.get('duration', ''),
+                'description': episode_data.get('sinopsis', ''),
+                'play_links': episode_data.get('play_links', [])
+            }
+            normalized_episodes.append(episode)
+    
+    return normalized_episodes
+
+def normalize_channel_data(channel_data, doc_id=None):
+    """Normalizar datos de canal desde la estructura de BD a la esperada por la API"""
+    if doc_id:
+        channel_data['id'] = doc_id
+    
+    normalized = {
+        'id': channel_data.get('id'),
+        'name': channel_data.get('name', ''),
+        'logo': channel_data.get('image_url', ''),  # image_url → logo
+        'status': channel_data.get('status', ''),
+        'category': channel_data.get('category', ''),
+        'country': channel_data.get('country', ''),
+        'stream_options': channel_data.get('stream_options', [])
+    }
+    
+    # Limpiar campos vacíos
+    return {k: v for k, v in normalized.items() if v not in [None, '', [], {}]}
+
 # Decorador para verificar Firebase
 def check_firebase():
     if not db:
@@ -1649,8 +1753,7 @@ def get_peliculas(user_data):
         
         peliculas = []
         for doc in docs:
-            pelicula_data = doc.to_dict()
-            pelicula_data['id'] = doc.id
+            pelicula_data = normalize_movie_data(doc.to_dict(), doc.id)
             
             # OPTIMIZAR IMAGEN si existe poster
             if pelicula_data.get('poster'):
@@ -1691,8 +1794,7 @@ def get_pelicula(user_data, pelicula_id):
         doc = doc_ref.get()
         
         if doc.exists:
-            pelicula_data = doc.to_dict()
-            pelicula_data['id'] = doc.id
+            pelicula_data = normalize_movie_data(doc.to_dict(), doc.id)
             
             # Aplicar restricciones de plan
             plan_type = user_data.get('plan_type', 'free')
@@ -1735,8 +1837,9 @@ def get_series(user_data):
         series = []
         for doc in docs:
             serie_data = doc.to_dict()
-            if 'seasons' in serie_data:
-                serie_data['id'] = doc.id
+            # Verificar si es una serie (tiene seasons)
+            if serie_data.get('seasons'):
+                serie_data = normalize_series_data(serie_data, doc.id)
                 
                 # OPTIMIZAR IMAGEN si existe poster
                 if serie_data.get('poster'):
@@ -1771,19 +1874,23 @@ def get_serie(user_data, serie_id):
         
         if doc.exists:
             serie_data = doc.to_dict()
-            serie_data['id'] = doc.id
-            
-            # OPTIMIZAR IMAGEN si existe poster
-            if serie_data.get('poster'):
-                serie_data['poster_optimized'] = get_optimized_image_url(
-                    serie_data['poster'], 
-                    user_data.get('plan_type', 'premium')
-                )
-            
-            return jsonify({
-                "success": True,
-                "data": serie_data
-            })
+            # Verificar si es una serie (tiene seasons)
+            if serie_data.get('seasons'):
+                serie_data = normalize_series_data(serie_data, doc.id)
+                
+                # OPTIMIZAR IMAGEN si existe poster
+                if serie_data.get('poster'):
+                    serie_data['poster_optimized'] = get_optimized_image_url(
+                        serie_data['poster'], 
+                        user_data.get('plan_type', 'premium')
+                    )
+                
+                return jsonify({
+                    "success": True,
+                    "data": serie_data
+                })
+            else:
+                return jsonify({"error": "No es una serie válida"}), 404
         else:
             return jsonify({"error": "Serie no encontrada"}), 404
             
@@ -1804,8 +1911,7 @@ def get_canales(user_data):
         
         canales = []
         for doc in docs:
-            canal_data = doc.to_dict()
-            canal_data['id'] = doc.id
+            canal_data = normalize_channel_data(doc.to_dict(), doc.id)
             
             # OPTIMIZAR IMAGEN si existe logo
             if canal_data.get('logo'):
@@ -1838,8 +1944,7 @@ def get_canal(user_data, canal_id):
         doc = doc_ref.get()
         
         if doc.exists:
-            canal_data = doc.to_dict()
-            canal_data['id'] = doc.id
+            canal_data = normalize_channel_data(doc.to_dict(), doc.id)
             
             # OPTIMIZAR IMAGEN si existe logo
             if canal_data.get('logo'):
@@ -1886,8 +1991,7 @@ def buscar(user_data):
         peliculas_docs = peliculas_query.limit(limit).stream()
         
         for doc in peliculas_docs:
-            data = doc.to_dict()
-            data['id'] = doc.id
+            data = normalize_movie_data(doc.to_dict(), doc.id)
             data['tipo'] = 'pelicula'
             
             # OPTIMIZAR IMAGEN si existe poster
@@ -1911,8 +2015,9 @@ def buscar(user_data):
             
             for doc in series_docs:
                 data = doc.to_dict()
-                if 'seasons' in data:
-                    data['id'] = doc.id
+                # Solo incluir si es una serie (tiene seasons)
+                if data.get('seasons'):
+                    data = normalize_series_data(data, doc.id)
                     data['tipo'] = 'serie'
                     
                     # OPTIMIZAR IMAGEN si existe poster
@@ -1946,30 +2051,45 @@ def get_stream_url(user_data, content_id):
         return firebase_check
     
     try:
-        # Buscar el contenido
+        # Buscar el contenido en películas
         content_ref = db.collection('peliculas').document(content_id)
         content_doc = content_ref.get()
         
-        if not content_doc.exists:
+        streaming_url = None
+        content_type = "pelicula"
+        
+        if content_doc.exists:
+            content_data = normalize_movie_data(content_doc.to_dict(), content_id)
+            # Buscar en play_links para películas
+            play_links = content_data.get('play_links', [])
+            if play_links:
+                streaming_url = play_links[0].get('url')  # Tomar el primer enlace
+        else:
             # Buscar en series
             content_ref = db.collection('contenido').document(content_id)
             content_doc = content_ref.get()
             
-        if content_doc.exists:
-            content_data = content_doc.to_dict()
-            streaming_url = content_data.get('streaming_url')
-            
-            if streaming_url:
+            if content_doc.exists:
+                content_data = doc.to_dict()
+                content_type = "serie"
+                # Para series, necesitaríamos lógica más compleja para episodios específicos
+                # Por ahora, devolver un mensaje informativo
                 return jsonify({
-                    "success": True,
-                    "streaming_url": streaming_url,
-                    "expires_in": 3600,  # URL expira en 1 hora
-                    "quality": "HD"
-                })
-            else:
-                return jsonify({"error": "URL de streaming no disponible"}), 404
+                    "success": False,
+                    "message": "Para series, especifique temporada y episodio",
+                    "content_type": "serie"
+                }), 400
+            
+        if streaming_url:
+            return jsonify({
+                "success": True,
+                "streaming_url": streaming_url,
+                "content_type": content_type,
+                "expires_in": 3600,  # URL expira en 1 hora
+                "quality": "HD"
+            })
         else:
-            return jsonify({"error": "Contenido no encontrado"}), 404
+            return jsonify({"error": "URL de streaming no disponible"}), 404
             
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1992,7 +2112,8 @@ def get_estadisticas(user_data):
             series_ref = db.collection('contenido')
             series_docs = series_ref.limit(1000).stream()
             for doc in series_docs:
-                if 'seasons' in doc.to_dict():
+                data = doc.to_dict()
+                if data.get('seasons'):
                     series_count += 1
         
         # Contar canales
