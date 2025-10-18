@@ -566,7 +566,7 @@ def limit_content_info(content_data, content_type):
         limited_data['upgrade_required'] = True
     else:
         limited_data['streaming_available'] = False
-    if 'download_links' in content_
+    if 'download_links' in content_data:
         limited_data['downloads_available'] = True
         limited_data['upgrade_required'] = True
     else:
@@ -630,7 +630,7 @@ def token_required(f):
                 user_data['is_admin'] = False
                 user_data['plan_type'] = user_data.get('plan_type', 'free')
                 break
-            if not user_
+            if not user_data:
                 return jsonify({"error": "Token inválido o no autorizado"}), 401
             if not user_data.get('active', True):
                 return jsonify({"error": "Cuenta desactivada"}), 401
@@ -734,7 +734,7 @@ def admin_create_user(user_data):
         return firebase_check
     try:
         data = request.get_json()
-        if not 
+        if not data:
             return jsonify({"error": "Datos JSON requeridos"}), 400
         username = data.get('username')
         email = data.get('email')
@@ -857,7 +857,7 @@ def admin_update_limits(user_data):
         return firebase_check
     try:
         data = request.get_json()
-        if not 
+        if not data:
             return jsonify({"error": "Datos JSON requeridos"}), 400
         user_id = data.get('user_id')
         daily_limit = data.get('daily_limit')
@@ -979,7 +979,7 @@ def admin_regenerate_token(user_data):
         return firebase_check
     try:
         data = request.get_json()
-        if not 
+        if not data:
             return jsonify({"error": "Datos JSON requeridos"}), 400
         user_id = data.get('user_id')
         if not user_id:
