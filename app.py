@@ -338,14 +338,13 @@ def notify_limit_reached(user_data, limit_type, current_usage, limit, reset_time
 
 # FUNCIONES PARA NORMALIZAR DATOS DE LA BASE DE DATOS
 def normalize_movie_data(movie_data, doc_id=None):
-    """Normalizar datos de película desde la estructura de BD a la esperada por la API"""
     if doc_id:
         movie_data['id'] = doc_id
     normalized = {
         'id': movie_data.get('id'),
         'title': movie_data.get('title', ''),
-        'poster': movie_data.get('image_url', ''),  # image_url → poster
-        'description': movie_data.get('sinopsis', ''),  # sinopsis → description
+        'poster': movie_data.get('image_url', ''),
+        'description': movie_data.get('sinopsis', ''),
         'year': movie_data.get('details', {}).get('year', '') if movie_data.get('details') else movie_data.get('year', ''),
         'genre': ', '.join(movie_data.get('details', {}).get('genres', [])) if movie_data.get('details') and movie_data.get('details', {}).get('genres') else movie_data.get('genre', ''),
         'rating': movie_data.get('details', {}).get('rating', '') if movie_data.get('details') else movie_data.get('rating', ''),
@@ -358,14 +357,13 @@ def normalize_movie_data(movie_data, doc_id=None):
     return {k: v for k, v in normalized.items() if v not in [None, '', [], {}]}
 
 def normalize_series_data(series_data, doc_id=None):
-    """Normalizar datos de serie desde la estructura de BD a la esperada por la API"""
     if doc_id:
         series_data['id'] = doc_id
     normalized = {
         'id': series_data.get('id'),
         'title': series_data.get('title', ''),
-        'poster': series_data.get('image_url', ''),  # image_url → poster
-        'description': series_data.get('sinopsis', ''),  # sinopsis → description
+        'poster': series_data.get('image_url', ''),
+        'description': series_data.get('sinopsis', ''),
         'year': series_data.get('details', {}).get('year', '') if series_data.get('details') else series_data.get('year', ''),
         'genre': ', '.join(series_data.get('details', {}).get('genres', [])) if series_data.get('details') and series_data.get('details', {}).get('genres') else series_data.get('genre', ''),
         'rating': series_data.get('details', {}).get('rating', '') if series_data.get('details') else series_data.get('rating', ''),
@@ -376,7 +374,6 @@ def normalize_series_data(series_data, doc_id=None):
     return {k: v for k, v in normalized.items() if v not in [None, '', [], {}, 0]}
 
 def normalize_seasons_data(seasons_dict):
-    """Normalizar estructura de temporadas"""
     if not seasons_dict:
         return []
     normalized_seasons = []
@@ -392,7 +389,6 @@ def normalize_seasons_data(seasons_dict):
     return normalized_seasons
 
 def normalize_episodes_data(episodes_dict):
-    """Normalizar estructura de episodios"""
     if not episodes_dict:
         return []
     normalized_episodes = []
@@ -409,13 +405,12 @@ def normalize_episodes_data(episodes_dict):
     return normalized_episodes
 
 def normalize_channel_data(channel_data, doc_id=None):
-    """Normalizar datos de canal desde la estructura de BD a la esperada por la API"""
     if doc_id:
         channel_data['id'] = doc_id
     normalized = {
         'id': channel_data.get('id'),
         'name': channel_data.get('name', ''),
-        'logo': channel_data.get('image_url', ''),  # image_url → logo
+        'logo': channel_data.get('image_url', ''),
         'status': channel_data.get('status', ''),
         'category': channel_data.get('category', ''),
         'country': channel_data.get('country', ''),
@@ -435,7 +430,6 @@ def check_firebase():
 
 # Función para verificar rate limiting por IP
 def check_ip_rate_limit(ip_address):
-    """Verificar límites de tasa por IP"""
     current_time = time.time()
     with ip_lock:
         ip_request_times[ip_address] = [
@@ -455,7 +449,6 @@ def check_ip_rate_limit(ip_address):
 
 # Función para verificar rate limiting por usuario
 def check_user_rate_limit(user_data):
-    """Verificar límites de tasa por usuario"""
     user_id = user_data.get('user_id')
     plan_type = user_data.get('plan_type', 'free')
     if user_data.get('is_admin'):
@@ -480,7 +473,6 @@ def check_user_rate_limit(user_data):
 
 # Función para verificar y actualizar límites de uso
 def check_usage_limits(user_data):
-    """Verificar límites de uso diario, por sesión y rate limiting"""
     if user_data.get('is_admin'):
         return None
     user_id = user_data.get('user_id')
@@ -560,7 +552,6 @@ def check_usage_limits(user_data):
 
 # Función para limitar información de contenido para usuarios free
 def limit_content_info(content_data, content_type):
-    """Limitar información para usuarios free"""
     limited_data = {
         'id': content_data.get('id'),
         'title': content_data.get('title'),
@@ -571,16 +562,15 @@ def limit_content_info(content_data, content_type):
         'description': content_data.get('description', '')[:100] + '...' if content_data.get('description') else ''
     }
     if 'streaming_url' in content_data:
-    limited_data['streaming_available'] = True
-    limited_data['upgrade_required'] = True
-else:
-    limited_data['streaming_available'] = False
-
-if 'download_links' in content_data:
-    limited_data['downloads_available'] = True
-    limited_data['upgrade_required'] = True
-else:
-    limited_data['downloads_available'] = False
+        limited_data['streaming_available'] = True
+        limited_data['upgrade_required'] = True
+    else:
+        limited_data['streaming_available'] = False
+    if 'download_links' in content_
+        limited_data['downloads_available'] = True
+        limited_data['upgrade_required'] = True
+    else:
+        limited_data['downloads_available'] = False
     return limited_data
 
 # Middleware de seguridad global
@@ -744,7 +734,7 @@ def admin_create_user(user_data):
         return firebase_check
     try:
         data = request.get_json()
-        if not data:
+        if not 
             return jsonify({"error": "Datos JSON requeridos"}), 400
         username = data.get('username')
         email = data.get('email')
@@ -768,7 +758,7 @@ def admin_create_user(user_data):
             return jsonify({"error": "Los límites deben ser mayores a 0"}), 400
         token = generate_unique_token()
         current_time = time.time()
-        user_data = {
+        user_data_firestore = {
             'username': username,
             'email': email,
             'token': token,
@@ -787,7 +777,7 @@ def admin_create_user(user_data):
             'features': plan_config['features']
         }
         user_ref = users_ref.document()
-        user_ref.set(user_data)
+        user_ref.set(user_data_firestore)
         return jsonify({
             "success": True,
             "message": "Usuario creado exitosamente",
@@ -908,7 +898,7 @@ def admin_change_plan(user_data):
         return firebase_check
     try:
         data = request.get_json()
-        if not 
+        if not data:
             return jsonify({"error": "Datos JSON requeridos"}), 400
         user_id = data.get('user_id')
         new_plan = data.get('new_plan', 'free').lower()
@@ -952,7 +942,7 @@ def admin_reset_limits(user_data):
         return firebase_check
     try:
         data = request.get_json()
-        if not 
+        if not data:
             return jsonify({"error": "Datos JSON requeridos"}), 400
         user_id = data.get('user_id')
         reset_type = data.get('reset_type', 'both')
