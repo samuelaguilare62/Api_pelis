@@ -1,3 +1,5 @@
+[file name]: app.py
+[file content begin]
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import firebase_admin
@@ -94,7 +96,9 @@ PLAN_CONFIG = {
             'request_priority': 'low',
             'bulk_operations': False,
             'advanced_filters': False,
-            'content_recommendations': False
+            'content_recommendations': False,
+            'content_creation': False,
+            'content_editing': False
         }
     },
     'premium': {
@@ -113,7 +117,9 @@ PLAN_CONFIG = {
             'request_priority': 'high',
             'bulk_operations': True,
             'advanced_filters': True,
-            'content_recommendations': True
+            'content_recommendations': True,
+            'content_creation': True,
+            'content_editing': True
         }
     }
 }
@@ -417,6 +423,141 @@ def normalize_channel_data(channel_data, doc_id=None):
         'stream_options': channel_data.get('stream_options', [])
     }
     return {k: v for k, v in normalized.items() if v not in [None, '', [], {}]}
+
+# FUNCIONES PARA VALIDACIÓN DE ESTRUCTURAS
+def validate_movie_structure(data):
+    """Valida que la estructura de película coincida con la documentación"""
+    errors = []
+    
+    # Campos obligatorios
+    if not data.get('title'):
+        errors.append("El campo 'title' es obligatorio")
+    if not data.get('image_url'):
+        errors.append("El campo 'image_url' es obligatorio")
+    
+    # Validar estructura de details
+    if 'details' in data:
+        details = data['details']
+        if not isinstance(details, dict):
+            errors.append("El campo 'details' debe ser un objeto")
+        else:
+            if 'year' in details and not isinstance(details['year'], str):
+                errors.append("El campo 'year' en details debe ser string")
+            if 'genres' in details and not isinstance(details['genres'], list):
+                errors.append("El campo 'genres' en details debe ser un array")
+            if 'actors' in details and not isinstance(details['actors'], list):
+                errors.append("El campo 'actors' en details debe ser un array")
+    
+    # Validar estructura de play_links
+    if 'play_links' in data:
+        play_links = data['play_links']
+        if not isinstance(play_links, list):
+            errors.append("El campo 'play_links' debe ser un array")
+        else:
+            for i, link in enumerate(play_links):
+                if not isinstance(link, dict):
+                    errors.append(f"play_links[{i}] debe ser un objeto")
+                else:
+                    if not link.get('server'):
+                        errors.append(f"play_links[{i}] debe tener campo 'server'")
+                    if not link.get('url'):
+                        errors.append(f"play_links[{i}] debe tener campo 'url'")
+    
+    return errors
+
+def validate_series_structure(data):
+    """Valida que la estructura de serie coincida con la documentación"""
+    errors = []
+    
+    # Campos obligatorios
+    if not data.get('title'):
+        errors.append("El campo 'title' es obligatorio")
+    if not data.get('image_url'):
+        errors.append("El campo 'image_url' es obligatorio")
+    
+    # Validar estructura de details
+    if 'details' in data:
+        details = data['details']
+        if not isinstance(details, dict):
+            errors.append("El campo 'details' debe ser un objeto")
+        else:
+            if 'year' in details and not isinstance(details['year'], str):
+                errors.append("El campo 'year' en details debe ser string")
+            if 'genres' in details and not isinstance(details['genres'], list):
+                errors.append("El campo 'genres' en details debe ser un array")
+            if 'total_seasons' in details and not isinstance(details['total_seasons'], int):
+                errors.append("El campo 'total_seasons' en details debe ser número entero")
+    
+    # Validar estructura de seasons
+    if 'seasons' in data:
+        seasons = data['seasons']
+        if not isinstance(seasons, dict):
+            errors.append("El campo 'seasons' debe ser un objeto")
+        else:
+            for season_key, season_data in seasons.items():
+                if not season_key.startswith('season-'):
+                    errors.append(f"La clave de temporada '{season_key}' debe empezar con 'season-'")
+                if not isinstance(season_data, dict):
+                    errors.append(f"La temporada '{season_key}' debe ser un objeto")
+                else:
+                    # Validar episodios dentro de la temporada
+                    if 'episodes' in season_data:
+                        episodes = season_data['episodes']
+                        if not isinstance(episodes, dict):
+                            errors.append(f"El campo 'episodes' en {season_key} debe ser un objeto")
+                        else:
+                            for ep_key, ep_data in episodes.items():
+                                if not ep_key.startswith('episode-'):
+                                    errors.append(f"La clave de episodio '{ep_key}' debe empezar con 'episode-'")
+    
+    return errors
+
+def validate_channel_structure(data):
+    """Valida que la estructura de canal coincida con la documentación"""
+    errors = []
+    
+    # Campos obligatorios
+    if not data.get('name'):
+        errors.append("El campo 'name' es obligatorio")
+    if not data.get('image_url'):
+        errors.append("El campo 'image_url' es obligatorio")
+    
+    # Validar estructura de stream_options
+    if 'stream_options' in data:
+        stream_options = data['stream_options']
+        if not isinstance(stream_options, list):
+            errors.append("El campo 'stream_options' debe ser un array")
+        else:
+            for i, option in enumerate(stream_options):
+                if not isinstance(option, dict):
+                    errors.append(f"stream_options[{i}] debe ser un objeto")
+                else:
+                    if not option.get('option_name'):
+                        errors.append(f"stream_options[{i}] debe tener campo 'option_name'")
+                    if not option.get('stream_url'):
+                        errors.append(f"stream_options[{i}] debe tener campo 'stream_url'")
+    
+    return errors
+
+# FUNCIÓN PARA NORMALIZAR ID
+def normalize_id(title):
+    """Normaliza un título para crear un ID válido"""
+    import unicodedata
+    import re
+    
+    # Convertir a minúsculas y normalizar
+    normalized = title.lower()
+    # Quitar acentos
+    normalized = ''.join(
+        c for c in unicodedata.normalize('NFD', normalized)
+        if unicodedata.category(c) != 'Mn'
+    )
+    # Reemplazar espacios y caracteres especiales
+    normalized = re.sub(r'[^a-z0-9\s-]', '', normalized)
+    normalized = re.sub(r'[\s-]+', '-', normalized)
+    normalized = normalized.strip('-')
+    
+    return normalized
 
 # Decorador para verificar Firebase
 def check_firebase():
@@ -723,7 +864,10 @@ def diagnostic():
         }
     })
 
-# Endpoints de administración (solo para admins)
+# =============================================
+# ENDPOINTS DE ADMINISTRACIÓN (SOLO ADMINS)
+# =============================================
+
 @app.route('/api/admin/create-user', methods=['POST'])
 @token_required
 def admin_create_user(user_data):
@@ -1059,7 +1203,412 @@ def admin_usage_statistics(user_data):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Endpoints para usuarios normales
+# =============================================
+# ENDPOINTS DE CREACIÓN Y EDICIÓN DE CONTENIDO
+# =============================================
+
+# ENDPOINTS PARA PELÍCULAS
+@app.route('/api/peliculas', methods=['POST'])
+@token_required
+@check_plan_feature('content_creation')
+def create_pelicula(user_data):
+    """Crear nueva película (Admin y Premium)"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Datos JSON requeridos"}), 400
+        
+        # Validar estructura
+        validation_errors = validate_movie_structure(data)
+        if validation_errors:
+            return jsonify({
+                "error": "Estructura de película inválida",
+                "details": validation_errors
+            }), 400
+        
+        # Generar ID automático si no se proporciona
+        doc_id = data.get('id')
+        if not doc_id:
+            doc_id = normalize_id(data['title'])
+            # Agregar año si está disponible para hacerlo único
+            if data.get('details', {}).get('year'):
+                doc_id = f"{doc_id}-{data['details']['year']}"
+        
+        # Verificar si ya existe
+        existing_doc = db.collection('peliculas').document(doc_id).get()
+        if existing_doc.exists:
+            return jsonify({
+                "error": "Ya existe una película con este ID",
+                "suggested_id": f"{doc_id}-{int(time.time())}"
+            }), 409
+        
+        # Agregar metadatos de creación
+        data['created_by'] = user_data.get('username', 'unknown')
+        data['created_at'] = firestore.SERVER_TIMESTAMP
+        data['last_updated'] = firestore.SERVER_TIMESTAMP
+        data['is_active'] = True
+        
+        # Crear documento
+        doc_ref = db.collection('peliculas').document(doc_id)
+        doc_ref.set(data)
+        
+        return jsonify({
+            "success": True,
+            "message": "Película creada exitosamente",
+            "id": doc_id,
+            "data": normalize_movie_data(data, doc_id)
+        }), 201
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/peliculas/<pelicula_id>', methods=['PUT'])
+@token_required
+@check_plan_feature('content_editing')
+def update_pelicula(user_data, pelicula_id):
+    """Actualizar película existente (Admin y Premium)"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Datos JSON requeridos"}), 400
+        
+        # Verificar que la película existe
+        doc_ref = db.collection('peliculas').document(pelicula_id)
+        doc = doc_ref.get()
+        if not doc.exists:
+            return jsonify({"error": "Película no encontrada"}), 404
+        
+        # Validar estructura
+        validation_errors = validate_movie_structure(data)
+        if validation_errors:
+            return jsonify({
+                "error": "Estructura de película inválida",
+                "details": validation_errors
+            }), 400
+        
+        # Agregar metadatos de actualización
+        data['last_updated'] = firestore.SERVER_TIMESTAMP
+        data['updated_by'] = user_data.get('username', 'unknown')
+        
+        # Actualizar documento
+        doc_ref.update(data)
+        
+        # Obtener datos actualizados
+        updated_doc = doc_ref.get()
+        updated_data = normalize_movie_data(updated_doc.to_dict(), pelicula_id)
+        
+        return jsonify({
+            "success": True,
+            "message": "Película actualizada exitosamente",
+            "id": pelicula_id,
+            "data": updated_data
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/peliculas/<pelicula_id>', methods=['DELETE'])
+@token_required
+def delete_pelicula(user_data, pelicula_id):
+    """Eliminar película (Solo Admin)"""
+    if not user_data.get('is_admin'):
+        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+    
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    try:
+        doc_ref = db.collection('peliculas').document(pelicula_id)
+        doc = doc_ref.get()
+        if not doc.exists:
+            return jsonify({"error": "Película no encontrada"}), 404
+        
+        # Eliminar documento
+        doc_ref.delete()
+        
+        return jsonify({
+            "success": True,
+            "message": "Película eliminada exitosamente",
+            "id": pelicula_id
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ENDPOINTS PARA SERIES
+@app.route('/api/series', methods=['POST'])
+@token_required
+@check_plan_feature('content_creation')
+def create_serie(user_data):
+    """Crear nueva serie (Admin y Premium)"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Datos JSON requeridos"}), 400
+        
+        # Validar estructura
+        validation_errors = validate_series_structure(data)
+        if validation_errors:
+            return jsonify({
+                "error": "Estructura de serie inválida",
+                "details": validation_errors
+            }), 400
+        
+        # Generar ID automático si no se proporciona
+        doc_id = data.get('id')
+        if not doc_id:
+            doc_id = normalize_id(data['title'])
+        
+        # Verificar si ya existe
+        existing_doc = db.collection('contenido').document(doc_id).get()
+        if existing_doc.exists:
+            return jsonify({
+                "error": "Ya existe una serie con este ID",
+                "suggested_id": f"{doc_id}-{int(time.time())}"
+            }), 409
+        
+        # Agregar metadatos de creación
+        data['created_by'] = user_data.get('username', 'unknown')
+        data['created_at'] = firestore.SERVER_TIMESTAMP
+        data['last_updated'] = firestore.SERVER_TIMESTAMP
+        data['is_active'] = True
+        data['content_type'] = 'serie'
+        
+        # Crear documento
+        doc_ref = db.collection('contenido').document(doc_id)
+        doc_ref.set(data)
+        
+        return jsonify({
+            "success": True,
+            "message": "Serie creada exitosamente",
+            "id": doc_id,
+            "data": normalize_series_data(data, doc_id)
+        }), 201
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/series/<serie_id>', methods=['PUT'])
+@token_required
+@check_plan_feature('content_editing')
+def update_serie(user_data, serie_id):
+    """Actualizar serie existente (Admin y Premium)"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Datos JSON requeridos"}), 400
+        
+        # Verificar que la serie existe
+        doc_ref = db.collection('contenido').document(serie_id)
+        doc = doc_ref.get()
+        if not doc.exists:
+            return jsonify({"error": "Serie no encontrada"}), 404
+        
+        # Validar estructura
+        validation_errors = validate_series_structure(data)
+        if validation_errors:
+            return jsonify({
+                "error": "Estructura de serie inválida",
+                "details": validation_errors
+            }), 400
+        
+        # Agregar metadatos de actualización
+        data['last_updated'] = firestore.SERVER_TIMESTAMP
+        data['updated_by'] = user_data.get('username', 'unknown')
+        data['content_type'] = 'serie'
+        
+        # Actualizar documento
+        doc_ref.update(data)
+        
+        # Obtener datos actualizados
+        updated_doc = doc_ref.get()
+        updated_data = normalize_series_data(updated_doc.to_dict(), serie_id)
+        
+        return jsonify({
+            "success": True,
+            "message": "Serie actualizada exitosamente",
+            "id": serie_id,
+            "data": updated_data
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/series/<serie_id>', methods=['DELETE'])
+@token_required
+def delete_serie(user_data, serie_id):
+    """Eliminar serie (Solo Admin)"""
+    if not user_data.get('is_admin'):
+        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+    
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    try:
+        doc_ref = db.collection('contenido').document(serie_id)
+        doc = doc_ref.get()
+        if not doc.exists:
+            return jsonify({"error": "Serie no encontrada"}), 404
+        
+        # Eliminar documento
+        doc_ref.delete()
+        
+        return jsonify({
+            "success": True,
+            "message": "Serie eliminada exitosamente",
+            "id": serie_id
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ENDPOINTS PARA CANALES
+@app.route('/api/canales', methods=['POST'])
+@token_required
+@check_plan_feature('content_creation')
+def create_canal(user_data):
+    """Crear nuevo canal (Admin y Premium)"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Datos JSON requeridos"}), 400
+        
+        # Validar estructura
+        validation_errors = validate_channel_structure(data)
+        if validation_errors:
+            return jsonify({
+                "error": "Estructura de canal inválida",
+                "details": validation_errors
+            }), 400
+        
+        # Generar ID automático si no se proporciona
+        doc_id = data.get('id')
+        if not doc_id:
+            doc_id = normalize_id(data['name'])
+        
+        # Verificar si ya existe
+        existing_doc = db.collection('canales').document(doc_id).get()
+        if existing_doc.exists:
+            return jsonify({
+                "error": "Ya existe un canal con este ID",
+                "suggested_id": f"{doc_id}-{int(time.time())}"
+            }), 409
+        
+        # Agregar metadatos de creación
+        data['created_by'] = user_data.get('username', 'unknown')
+        data['created_at'] = firestore.SERVER_TIMESTAMP
+        data['last_updated'] = firestore.SERVER_TIMESTAMP
+        data['is_active'] = True
+        
+        # Crear documento
+        doc_ref = db.collection('canales').document(doc_id)
+        doc_ref.set(data)
+        
+        return jsonify({
+            "success": True,
+            "message": "Canal creado exitosamente",
+            "id": doc_id,
+            "data": normalize_channel_data(data, doc_id)
+        }), 201
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/canales/<canal_id>', methods=['PUT'])
+@token_required
+@check_plan_feature('content_editing')
+def update_canal(user_data, canal_id):
+    """Actualizar canal existente (Admin y Premium)"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Datos JSON requeridos"}), 400
+        
+        # Verificar que el canal existe
+        doc_ref = db.collection('canales').document(canal_id)
+        doc = doc_ref.get()
+        if not doc.exists:
+            return jsonify({"error": "Canal no encontrado"}), 404
+        
+        # Validar estructura
+        validation_errors = validate_channel_structure(data)
+        if validation_errors:
+            return jsonify({
+                "error": "Estructura de canal inválida",
+                "details": validation_errors
+            }), 400
+        
+        # Agregar metadatos de actualización
+        data['last_updated'] = firestore.SERVER_TIMESTAMP
+        data['updated_by'] = user_data.get('username', 'unknown')
+        
+        # Actualizar documento
+        doc_ref.update(data)
+        
+        # Obtener datos actualizados
+        updated_doc = doc_ref.get()
+        updated_data = normalize_channel_data(updated_doc.to_dict(), canal_id)
+        
+        return jsonify({
+            "success": True,
+            "message": "Canal actualizado exitosamente",
+            "id": canal_id,
+            "data": updated_data
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/canales/<canal_id>', methods=['DELETE'])
+@token_required
+def delete_canal(user_data, canal_id):
+    """Eliminar canal (Solo Admin)"""
+    if not user_data.get('is_admin'):
+        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+    
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    try:
+        doc_ref = db.collection('canales').document(canal_id)
+        doc = doc_ref.get()
+        if not doc.exists:
+            return jsonify({"error": "Canal no encontrado"}), 404
+        
+        # Eliminar documento
+        doc_ref.delete()
+        
+        return jsonify({
+            "success": True,
+            "message": "Canal eliminado exitosamente",
+            "id": canal_id
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# =============================================
+# ENDPOINTS EXISTENTES PARA USUARIOS NORMALES
+# =============================================
+
 @app.route('/api/user/info', methods=['GET'])
 @token_required
 def get_user_info(user_data):
@@ -1106,7 +1655,6 @@ def get_user_info(user_data):
         "user": user_response
     })
 
-# Endpoint de comparación de planes
 @app.route('/api/plan-comparison', methods=['GET'])
 def plan_comparison():
     comparison = {
@@ -1127,7 +1675,8 @@ def plan_comparison():
                 'No descargas',
                 'No acceso a series',
                 'Búsquedas limitadas',
-                'Sin soporte prioritario'
+                'Sin soporte prioritario',
+                'No puede crear/editar contenido'
             ]
         },
         'premium': {
@@ -1143,10 +1692,12 @@ def plan_comparison():
                 'Soporte prioritario 24/7',
                 'Acceso a series y contenido exclusivo',
                 'Operaciones masivas',
-                'Recomendaciones personalizadas'
+                'Recomendaciones personalizadas',
+                'Crear y editar películas/series/canales'
             ],
             'limitations': [
-                'Uso comercial requiere licencia'
+                'Uso comercial requiere licencia',
+                'No puede eliminar contenido'
             ]
         }
     }
@@ -1155,7 +1706,6 @@ def plan_comparison():
         "plans": comparison
     })
 
-# Endpoint principal (requiere token)
 @app.route('/')
 @token_required
 def home(user_data):
@@ -1182,6 +1732,25 @@ def home(user_data):
                 }
         except Exception as e:
             print(f"Error obteniendo información de límites: {e}")
+    
+    # Agregar información de endpoints de creación/edición
+    creation_endpoints = {}
+    if user_data.get('is_admin') or user_data.get('plan_type') == 'premium':
+        creation_endpoints = {
+            "create_movie": "POST /api/peliculas",
+            "update_movie": "PUT /api/peliculas/<id>",
+            "create_series": "POST /api/series",
+            "update_series": "PUT /api/series/<id>",
+            "create_channel": "POST /api/canales",
+            "update_channel": "PUT /api/canales/<id>"
+        }
+        if user_data.get('is_admin'):
+            creation_endpoints.update({
+                "delete_movie": "DELETE /api/peliculas/<id>",
+                "delete_series": "DELETE /api/series/<id>",
+                "delete_channel": "DELETE /api/canales/<id>"
+            })
+    
     return jsonify({
         "message": f"🎬 API de Streaming - {welcome_msg}",
         "version": "2.0.0",
@@ -1201,6 +1770,7 @@ def home(user_data):
             "estadisticas": "GET /api/estadisticas",
             "stream": "GET /api/stream/<id> (solo premium)"
         },
+        "creation_endpoints": creation_endpoints,
         "admin_endpoints": {
             "create_user": "POST /api/admin/create-user",
             "list_users": "GET /api/admin/users",
@@ -1213,7 +1783,7 @@ def home(user_data):
         "instructions": "Incluya el token en el header: Authorization: Bearer {token}"
     })
 
-# Endpoints de contenido (todos requieren token)
+# Endpoints de contenido (todos requieren token) - EXISTENTES
 @app.route('/api/peliculas', methods=['GET'])
 @token_required
 def get_peliculas(user_data):
@@ -1505,3 +2075,4 @@ def too_large(error):
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=5000)
+[file content end]
