@@ -1,5 +1,3 @@
-[file name]: app.py
-[file content begin]
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import firebase_admin
