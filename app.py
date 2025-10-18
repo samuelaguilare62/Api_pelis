@@ -570,16 +570,17 @@ def limit_content_info(content_data, content_type):
         'poster': content_data.get('poster'),
         'description': content_data.get('description', '')[:100] + '...' if content_data.get('description') else ''
     }
-    if 'streaming_url' in content_
-        limited_data['streaming_available'] = True
-        limited_data['upgrade_required'] = True
-    else:
-        limited_data['streaming_available'] = False
-    if 'download_links' in content_
-        limited_data['downloads_available'] = True
-        limited_data['upgrade_required'] = True
-    else:
-        limited_data['downloads_available'] = False
+    if 'streaming_url' in content_data:
+    limited_data['streaming_available'] = True
+    limited_data['upgrade_required'] = True
+else:
+    limited_data['streaming_available'] = False
+
+if 'download_links' in content_data:
+    limited_data['downloads_available'] = True
+    limited_data['upgrade_required'] = True
+else:
+    limited_data['downloads_available'] = False
     return limited_data
 
 # Middleware de seguridad global
