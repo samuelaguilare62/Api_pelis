@@ -29,25 +29,43 @@ EMAIL_CONFIG = {
 # Configuración de administrador - AHORA CON VARIABLE DE ENTORNO
 ADMIN_TOKENS = [os.environ.get('ADMIN_TOKEN', 'admin_token_secreto_2024')]
 
+# Variables globales para manejo de conexión Firebase
+firebase_app = None
+db = None
+last_connection_test = 0
+CONNECTION_TEST_INTERVAL = 300  # 5 minutos
+
 # Inicializar Firebase
 def initialize_firebase():
+    """Inicialización robusta de Firebase con manejo de errores"""
+    global firebase_app, db
+    
     try:
-        print("🔄 Inicializando Firebase SOLO con variables de entorno...")
+        # Limpiar apps existentes si hay
+        try:
+            if firebase_app:
+                firebase_admin.delete_app(firebase_app)
+        except:
+            pass
+            
+        print("🔄 Inicializando Firebase...")
+        
+        # Verificar variables críticas
         required_vars = ['FIREBASE_TYPE', 'FIREBASE_PROJECT_ID', 'FIREBASE_PRIVATE_KEY', 'FIREBASE_CLIENT_EMAIL']
-        missing_vars = []
-        for var in required_vars:
-            if not os.environ.get(var):
-                missing_vars.append(var)
+        missing_vars = [var for var in required_vars if not os.environ.get(var)]
+        
         if missing_vars:
-            print(f"❌ Variables de entorno faltantes: {missing_vars}")
-            print("💡 Configura estas variables en Render.com > Environment")
+            print(f"❌ Variables faltantes: {missing_vars}")
             return None
-        print("✅ Todas las variables de entorno están presentes")
+        
+        # Configurar service account con formato correcto
+        private_key = os.environ.get('FIREBASE_PRIVATE_KEY', '').replace('\\n', '\n')
+        
         service_account_info = {
             "type": os.environ.get('FIREBASE_TYPE'),
             "project_id": os.environ.get('FIREBASE_PROJECT_ID'),
             "private_key_id": os.environ.get('FIREBASE_PRIVATE_KEY_ID'),
-            "private_key": os.environ.get('FIREBASE_PRIVATE_KEY', '').replace('\n', '\n'),
+            "private_key": private_key,
             "client_email": os.environ.get('FIREBASE_CLIENT_EMAIL'),
             "client_id": os.environ.get('FIREBASE_CLIENT_ID'),
             "auth_uri": os.environ.get('FIREBASE_AUTH_URI'),
@@ -55,22 +73,57 @@ def initialize_firebase():
             "auth_provider_x509_cert_url": os.environ.get('FIREBASE_AUTH_PROVIDER_CERT_URL'),
             "client_x509_cert_url": os.environ.get('FIREBASE_CLIENT_CERT_URL')
         }
+        
+        # Inicializar Firebase
         cred = credentials.Certificate(service_account_info)
-        firebase_admin.initialize_app(cred)
+        firebase_app = firebase_admin.initialize_app(cred)
         db = firestore.client()
-        try:
-            print("🔍 Probando conexión a Firestore...")
-            test_ref = db.collection('api_users').limit(1)
-            docs = list(test_ref.stream())
-            print(f"✅ Conexión exitosa. Documentos encontrados: {len(docs)}")
-            return db
-        except Exception as e:
-            print(f"❌ Error en conexión a Firestore: {e}")
-            return None
+        
+        # Test de conexión rápido
+        test_ref = db.collection('api_users').limit(1)
+        docs = list(test_ref.stream())
+        print(f"✅ Firebase inicializado correctamente. Docs de prueba: {len(docs)}")
+        
+        return db
+        
     except Exception as e:
         print(f"❌ Error crítico inicializando Firebase: {e}")
+        import traceback
+        traceback.print_exc()
+        firebase_app = None
+        db = None
         return None
 
+def check_firebase_connection():
+    """Verificar y mantener la conexión a Firebase"""
+    global db, last_connection_test
+    
+    current_time = time.time()
+    
+    # Solo verificar cada 5 minutos para no sobrecargar
+    if current_time - last_connection_test < CONNECTION_TEST_INTERVAL:
+        return db is not None
+    
+    last_connection_test = current_time
+    
+    if not db:
+        print("🔌 No hay conexión a Firebase, intentando reconectar...")
+        return initialize_firebase() is not None
+    
+    try:
+        # Test simple de conexión
+        test_ref = db.collection('api_users').limit(1)
+        list(test_ref.stream())
+        print("✅ Conexión Firebase verificada")
+        return True
+    except Exception as e:
+        print(f"❌ Conexión Firebase perdida: {e}")
+        db = None
+        firebase_app = None
+        print("🔄 Intentando reconexión...")
+        return initialize_firebase() is not None
+
+# Inicializar Firebase al inicio
 db = initialize_firebase()
 
 # Colección para almacenar usuarios y tokens
@@ -559,12 +612,14 @@ def normalize_id(title):
 
 # Decorador para verificar Firebase
 def check_firebase():
-    if not db:
+    if not check_firebase_connection():
         return jsonify({
             "success": False,
-            "error": "Firebase no inicializado",
-            "solution": "Verifica las variables de entorno en Render.com"
-        }), 500
+            "error": "Firebase no disponible",
+            "solution": "El servicio se está reconectando automáticamente",
+            "reconnection_in_progress": True,
+            "timestamp": time.time()
+        }), 503
     return None
 
 # Función para verificar rate limiting por IP
@@ -818,10 +873,112 @@ def validate_username(username):
     pattern = r'^[a-zA-Z0-9_-]+$'
     return re.match(pattern, username) is not None
 
+# =============================================
+# ENDPOINTS DE CONEXIÓN Y RECONEXIÓN
+# =============================================
+
+@app.route('/api/connection/status', methods=['GET'])
+def connection_status():
+    """Verificar estado de la conexión Firebase"""
+    try:
+        firebase_healthy = check_firebase_connection()
+        current_time = time.time()
+        
+        status_info = {
+            "success": True,
+            "timestamp": current_time,
+            "firebase": {
+                "connected": firebase_healthy,
+                "project_id": os.environ.get('FIREBASE_PROJECT_ID', 'Unknown'),
+                "last_test": last_connection_test
+            },
+            "system": {
+                "python_version": os.environ.get('PYTHON_VERSION', 'Unknown'),
+                "environment": "production"
+            }
+        }
+        
+        return jsonify(status_info)
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "timestamp": time.time()
+        }), 500
+
+@app.route('/api/connection/reconnect', methods=['POST'])
+@token_required
+def reconnect_firebase(user_data):
+    """Forzar reconexión a Firebase (solo admin)"""
+    if not user_data.get('is_admin'):
+        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+    
+    try:
+        global db, firebase_app
+        
+        print("🔄 Reconexión forzada solicitada por admin...")
+        
+        # Limpiar conexión existente
+        try:
+            if firebase_app:
+                firebase_admin.delete_app(firebase_app)
+        except Exception as e:
+            print(f"⚠️ Error limpiando app existente: {e}")
+        
+        db = None
+        firebase_app = None
+        
+        # Reintentar inicialización
+        success = initialize_firebase() is not None
+        
+        if success:
+            return jsonify({
+                "success": True,
+                "message": "✅ Reconexión forzada exitosa",
+                "timestamp": time.time(),
+                "firebase_connected": True
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": "❌ No se pudo reconectar a Firebase",
+                "timestamp": time.time(),
+                "firebase_connected": False
+            }), 500
+            
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": f"Error en reconexión: {str(e)}",
+            "timestamp": time.time()
+        }), 500
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Endpoint para health checks de Render"""
+    try:
+        # Verificar Firebase
+        firebase_status = "healthy" if check_firebase_connection() else "unhealthy"
+        
+        return jsonify({
+            "status": "healthy",
+            "timestamp": time.time(),
+            "firebase": firebase_status,
+            "service": "API Streaming",
+            "version": "2.0.0"
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": time.time()
+        }), 500
+
 # Endpoint de diagnóstico
 @app.route('/api/diagnostic', methods=['GET'])
 def diagnostic():
-    firebase_status = "✅ Conectado" if db else "❌ Desconectado"
+    firebase_status = "✅ Conectado" if check_firebase_connection() else "❌ Desconectado"
     env_vars = {
         'FIREBASE_TYPE': "✅" if os.environ.get('FIREBASE_TYPE') else "❌",
         'FIREBASE_PROJECT_ID': "✅" if os.environ.get('FIREBASE_PROJECT_ID') else "❌", 
@@ -858,7 +1015,10 @@ def diagnostic():
             "diagnostic": "✅ /api/diagnostic",
             "home": "🔒 / (requiere token)",
             "admin": "🔒 /api/admin/* (requiere admin token)",
-            "content": "🔒 /api/* (requiere token)"
+            "content": "🔒 /api/* (requiere token)",
+            "health": "✅ /health",
+            "connection_status": "✅ /api/connection/status",
+            "reconnect": "🔒 /api/connection/reconnect (admin)"
         }
     })
 
@@ -1754,7 +1914,7 @@ def home(user_data):
         "version": "2.0.0",
         "user": user_data.get('username'),
         "plan_type": user_data.get('plan_type', 'free'),
-        "firebase_status": "✅ Conectado",
+        "firebase_status": "✅ Conectado" if db else "❌ Desconectado",
         "usage_limits": limits_info,
         "endpoints_available": {
             "user_info": "GET /api/user/info",
@@ -1766,7 +1926,9 @@ def home(user_data):
             "canal_especifico": "GET /api/canales/<id>",
             "buscar": "GET /api/buscar?q=<termino>",
             "estadisticas": "GET /api/estadisticas",
-            "stream": "GET /api/stream/<id> (solo premium)"
+            "stream": "GET /api/stream/<id> (solo premium)",
+            "connection_status": "GET /api/connection/status",
+            "health": "GET /health"
         },
         "creation_endpoints": creation_endpoints,
         "admin_endpoints": {
@@ -1776,7 +1938,8 @@ def home(user_data):
             "reset_limits": "POST /api/admin/reset-limits",
             "change_plan": "POST /api/admin/change-plan",
             "regenerate_token": "POST /api/admin/regenerate-token",
-            "usage_statistics": "GET /api/admin/usage-statistics"
+            "usage_statistics": "GET /api/admin/usage-statistics",
+            "reconnect_firebase": "POST /api/connection/reconnect"
         } if user_data.get('is_admin') else None,
         "instructions": "Incluya el token en el header: Authorization: Bearer {token}"
     })
@@ -2073,4 +2236,3 @@ def too_large(error):
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=5000)
-
