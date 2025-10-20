@@ -1782,13 +1782,52 @@ def get_user_info(user_data):
                 user_data.update(current_data)
         except Exception as e:
             print(f"Error obteniendo información actualizada: {e}")
+    
     current_time = time.time()
-    daily_reset = user_data.get('daily_reset_timestamp', current_time)
-    session_start = user_data.get('session_start_timestamp', current_time)
-    daily_remaining = max(0, 86400 - (current_time - daily_reset))
-    session_remaining = max(0, SESSION_TIMEOUT - (current_time - session_start))
     plan_type = user_data.get('plan_type', 'free')
-    plan_features = PLAN_CONFIG[plan_type]['features']
+    
+    # Para admin, no mostrar límites
+    if user_data.get('is_admin'):
+        usage_stats = {
+            "total": user_data.get('total_usage_count', 0),
+            "daily": "Ilimitado",
+            "session": "Ilimitado",
+            "daily_limit": "Ilimitado",
+            "session_limit": "Ilimitado",
+            "daily_reset_in": "No aplica",
+            "session_reset_in": "No aplica"
+        }
+        plan_features = {
+            'content_access': 'full',
+            'api_responses': 'enhanced',
+            'search_limit': 'Ilimitado',
+            'content_previews': True,
+            'streaming': True,
+            'download_links': True,
+            'api_support': 'priority',
+            'request_priority': 'highest',
+            'bulk_operations': True,
+            'advanced_filters': True,
+            'content_recommendations': True,
+            'content_creation': True,
+            'content_editing': True
+        }
+    else:
+        daily_reset = user_data.get('daily_reset_timestamp', current_time)
+        session_start = user_data.get('session_start_timestamp', current_time)
+        daily_remaining = max(0, 86400 - (current_time - daily_reset))
+        session_remaining = max(0, SESSION_TIMEOUT - (current_time - session_start))
+        plan_features = PLAN_CONFIG[plan_type]['features']
+        usage_stats = {
+            "total": user_data.get('total_usage_count', 0),
+            "daily": user_data.get('daily_usage_count', 0),
+            "session": user_data.get('session_usage_count', 0),
+            "daily_limit": user_data.get('max_requests_per_day', PLAN_CONFIG[plan_type]['daily_limit']),
+            "session_limit": user_data.get('max_requests_per_session', PLAN_CONFIG[plan_type]['session_limit']),
+            "daily_reset_in": f"{int(daily_remaining // 3600)}h {int((daily_remaining % 3600) // 60)}m",
+            "session_reset_in": f"{int(session_remaining // 60)}m {int(session_remaining % 60)}s"
+        }
+    
     user_response = {
         "user_id": user_data.get('user_id'),
         "username": user_data.get('username'),
@@ -1797,15 +1836,7 @@ def get_user_info(user_data):
         "is_admin": user_data.get('is_admin', False),
         "plan_type": plan_type,
         "created_at": user_data.get('created_at'),
-        "usage_stats": {
-            "total": user_data.get('total_usage_count', 0),
-            "daily": user_data.get('daily_usage_count', 0),
-            "session": user_data.get('session_usage_count', 0),
-            "daily_limit": user_data.get('max_requests_per_day', PLAN_CONFIG[plan_type]['daily_limit']),
-            "session_limit": user_data.get('max_requests_per_session', PLAN_CONFIG[plan_type]['session_limit']),
-            "daily_reset_in": f"{int(daily_remaining // 3600)}h {int((daily_remaining % 3600) // 60)}m",
-            "session_reset_in": f"{int(session_remaining // 60)}m {int(session_remaining % 60)}s"
-        },
+        "usage_stats": usage_stats,
         "features": plan_features
     }
     return jsonify({
@@ -1872,6 +1903,8 @@ def home(user_data):
         return firebase_check
     welcome_msg = "👋 ¡Bienvenido Administrador!" if user_data.get('is_admin') else "👋 ¡Bienvenido!"
     limits_info = None
+    
+    # Solo mostrar límites para usuarios no admin
     if not user_data.get('is_admin'):
         try:
             user_ref = db.collection(TOKENS_COLLECTION).document(user_data['user_id'])
@@ -1880,8 +1913,8 @@ def home(user_data):
                 current_data = user_doc.to_dict()
                 daily_usage = current_data.get('daily_usage_count', 0)
                 session_usage = current_data.get('session_usage_count', 0)
-                daily_limit = current_data.get('max_requests_per_day', PLAN_CONFIG['free']['daily_limit'])
-                session_limit = current_data.get('max_requests_per_session', PLAN_CONFIG['free']['session_limit'])
+                daily_limit = current_data.get('max_requests_per_day', PLAN_CONFIG[user_data.get('plan_type', 'free')]['daily_limit'])
+                session_limit = current_data.get('max_requests_per_session', PLAN_CONFIG[user_data.get('plan_type', 'free')]['session_limit'])
                 limits_info = {
                     "daily_usage": f"{daily_usage}/{daily_limit}",
                     "session_usage": f"{session_usage}/{session_limit}",
@@ -1890,6 +1923,13 @@ def home(user_data):
                 }
         except Exception as e:
             print(f"Error obteniendo información de límites: {e}")
+    else:
+        limits_info = {
+            "daily_usage": "Ilimitado",
+            "session_usage": "Ilimitado",
+            "remaining_daily": "Ilimitado",
+            "remaining_session": "Ilimitado"
+        }
     
     # Agregar información de endpoints de creación/edición
     creation_endpoints = {}
@@ -1955,34 +1995,44 @@ def get_peliculas(user_data):
         limit = int(request.args.get('limit', 20))
         page = int(request.args.get('page', 1))
         plan_type = user_data.get('plan_type', 'free')
-        plan_config = PLAN_CONFIG[plan_type]
-        if plan_type == 'free':
-            limit = min(limit, 10)
-            max_offset = 50
+        
+        # Admin no tiene límites
+        if user_data.get('is_admin'):
+            max_offset = 10000
+            limit = min(limit, 100)
         else:
-            max_offset = 1000
+            plan_config = PLAN_CONFIG[plan_type]
+            if plan_type == 'free':
+                limit = min(limit, 10)
+                max_offset = 50
+            else:
+                max_offset = 1000
+        
         peliculas_ref = db.collection('peliculas')
         offset = (page - 1) * limit
-        if plan_type == 'free' and offset >= max_offset:
+        
+        if not user_data.get('is_admin') and plan_type == 'free' and offset >= max_offset:
             return jsonify({
                 "success": True,
                 "count": 0,
                 "message": "Límite de contenido gratuito alcanzado. Actualiza a premium para acceso completo.",
                 "data": []
             })
+        
         docs = peliculas_ref.limit(limit).offset(offset).stream()
         peliculas = []
         for doc in docs:
             pelicula_data = normalize_movie_data(doc.to_dict(), doc.id)
-            if plan_type == 'free':
+            if plan_type == 'free' and not user_data.get('is_admin'):
                 pelicula_data = limit_content_info(pelicula_data, 'pelicula')
             peliculas.append(pelicula_data)
+        
         return jsonify({
             "success": True,
             "count": len(peliculas),
             "page": page,
             "limit": limit,
-            "plan_restrictions": plan_type == 'free',
+            "plan_restrictions": plan_type == 'free' and not user_data.get('is_admin'),
             "data": peliculas
         })
     except Exception as e:
@@ -2000,7 +2050,7 @@ def get_pelicula(user_data, pelicula_id):
         if doc.exists:
             pelicula_data = normalize_movie_data(doc.to_dict(), doc.id)
             plan_type = user_data.get('plan_type', 'free')
-            if plan_type == 'free':
+            if plan_type == 'free' and not user_data.get('is_admin'):
                 pelicula_data = limit_content_info(pelicula_data, 'pelicula')
             return jsonify({
                 "success": True,
@@ -2020,6 +2070,9 @@ def get_series(user_data):
         return firebase_check
     try:
         limit = int(request.args.get('limit', 20))
+        # Admin puede ver más contenido
+        if user_data.get('is_admin'):
+            limit = min(limit, 100)
         series_ref = db.collection('contenido')
         docs = series_ref.limit(limit).stream()
         series = []
@@ -2112,21 +2165,31 @@ def buscar(user_data):
         termino = request.args.get('q', '')
         if not termino:
             return jsonify({"error": "Término de búsqueda requerido"}), 400
-        plan_type = user_data.get('plan_type', 'free')
-        plan_config = PLAN_CONFIG[plan_type]
-        search_limit = plan_config['features']['search_limit']
+        
+        # Para admin, búsqueda ilimitada
+        if user_data.get('is_admin'):
+            search_limit = 1000
+        else:
+            plan_type = user_data.get('plan_type', 'free')
+            plan_config = PLAN_CONFIG[plan_type]
+            search_limit = plan_config['features']['search_limit']
+        
         limit = min(int(request.args.get('limit', 10)), search_limit)
         resultados = []
+        
         peliculas_ref = db.collection('peliculas')
         peliculas_query = peliculas_ref.where('title', '>=', termino).where('title', '<=', termino + '\uf8ff')
         peliculas_docs = peliculas_query.limit(limit).stream()
+        
         for doc in peliculas_docs:
             data = normalize_movie_data(doc.to_dict(), doc.id)
             data['tipo'] = 'pelicula'
-            if plan_type == 'free':
+            if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
                 data = limit_content_info(data, 'pelicula')
             resultados.append(data)
-        if plan_type == 'premium':
+        
+        # Solo premium y admin pueden buscar series
+        if user_data.get('is_admin') or user_data.get('plan_type') == 'premium':
             series_ref = db.collection('contenido')
             series_query = series_ref.where('title', '>=', termino).where('title', '<=', termino + '\uf8ff')
             series_docs = series_query.limit(limit).stream()
@@ -2136,12 +2199,14 @@ def buscar(user_data):
                     data = normalize_series_data(data, doc.id)
                     data['tipo'] = 'serie'
                     resultados.append(data)
+        
         return jsonify({
             "success": True,
             "termino": termino,
             "count": len(resultados),
             "search_limit": search_limit,
-            "plan_type": plan_type,
+            "plan_type": user_data.get('plan_type', 'free'),
+            "is_admin": user_data.get('is_admin', False),
             "data": resultados
         })
     except Exception as e:
@@ -2168,7 +2233,7 @@ def get_stream_url(user_data, content_id):
             content_ref = db.collection('contenido').document(content_id)
             content_doc = content_ref.get()
             if content_doc.exists:
-                content_data = doc.to_dict()
+                content_data = content_doc.to_dict()
                 content_type = "serie"
                 return jsonify({
                     "success": False,
@@ -2197,7 +2262,7 @@ def get_estadisticas(user_data):
     try:
         peliculas_count = len(list(db.collection('peliculas').limit(1000).stream()))
         series_count = 0
-        if user_data.get('plan_type') == 'premium' or user_data.get('is_admin'):
+        if user_data.get('is_admin') or user_data.get('plan_type') == 'premium':
             series_ref = db.collection('contenido')
             series_docs = series_ref.limit(1000).stream()
             for doc in series_docs:
@@ -2209,9 +2274,9 @@ def get_estadisticas(user_data):
             "success": True,
             "data": {
                 "total_peliculas": peliculas_count,
-                "total_series": series_count if (user_data.get('plan_type') == 'premium' or user_data.get('is_admin')) else "Requiere plan premium",
+                "total_series": series_count if (user_data.get('is_admin') or user_data.get('plan_type') == 'premium') else "Requiere plan premium",
                 "total_canales": canales_count,
-                "total_contenido": peliculas_count + series_count if (user_data.get('plan_type') == 'premium' or user_data.get('is_admin')) else "Requiere plan premium"
+                "total_contenido": peliculas_count + series_count if (user_data.get('is_admin') or user_data.get('plan_type') == 'premium') else "Requiere plan premium"
             }
         })
     except Exception as e:
