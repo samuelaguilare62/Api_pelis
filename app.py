@@ -132,9 +132,9 @@ TOKENS_COLLECTION = "api_users"
 # Configuración de planes
 PLAN_CONFIG = {
     'free': {
-        'daily_limit': 50,
-        'session_limit': 5,
-        'rate_limit_per_minute': 10,
+        'daily_limit': 200,
+        'session_limit': 10,
+        'rate_limit_per_minute': 15,
         'concurrent_requests': 1,
         'features': {
             'content_access': 'limited',
@@ -153,9 +153,9 @@ PLAN_CONFIG = {
         }
     },
     'premium': {
-        'daily_limit': 1000,
-        'session_limit': 100,
-        'rate_limit_per_minute': 60,
+        'daily_limit': 30000,       # antes 1000, ahora dura todo el día
+        'session_limit': 2000,      # antes 100
+        'rate_limit_per_minute': 120,
         'concurrent_requests': 3,
         'features': {
             'content_access': 'full',
