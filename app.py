@@ -816,7 +816,7 @@ def token_required(f):
                     'username': 'Administrador',
                     'email': 'admin@api.com',
                     'is_admin': True,
-                    'plan_type': 'admin'
+                    'plan_type': 'premium'  # Admin tiene plan premium
                 }
                 return f(user_data, *args, **kwargs)
             users_ref = db.collection(TOKENS_COLLECTION)
@@ -846,6 +846,7 @@ def check_plan_feature(feature_name):
     def decorator(f):
         @wraps(f)
         def decorated_function(user_data, *args, **kwargs):
+            # Admin siempre tiene acceso a todas las características
             if user_data.get('is_admin'):
                 return f(user_data, *args, **kwargs)
             plan_type = user_data.get('plan_type', 'free')
@@ -1790,7 +1791,7 @@ def get_user_info(user_data):
     current_time = time.time()
     plan_type = user_data.get('plan_type', 'free')
     
-    # Para admin, no mostrar límites
+    # Para admin, mostrar como premium sin límites
     if user_data.get('is_admin'):
         usage_stats = {
             "total": user_data.get('total_usage_count', 0),
@@ -1801,21 +1802,7 @@ def get_user_info(user_data):
             "daily_reset_in": "No aplica",
             "session_reset_in": "No aplica"
         }
-        plan_features = {
-            'content_access': 'full',
-            'api_responses': 'enhanced',
-            'search_limit': 'Ilimitado',
-            'content_previews': True,
-            'streaming': True,
-            'download_links': True,
-            'api_support': 'priority',
-            'request_priority': 'highest',
-            'bulk_operations': True,
-            'advanced_filters': True,
-            'content_recommendations': True,
-            'content_creation': True,
-            'content_editing': True
-        }
+        plan_features = PLAN_CONFIG['premium']['features']
     else:
         daily_reset = user_data.get('daily_reset_timestamp', current_time)
         session_start = user_data.get('session_start_timestamp', current_time)
@@ -1838,7 +1825,7 @@ def get_user_info(user_data):
         "email": user_data.get('email'),
         "active": user_data.get('active', True),
         "is_admin": user_data.get('is_admin', False),
-        "plan_type": plan_type,
+        "plan_type": 'premium' if user_data.get('is_admin') else plan_type,
         "created_at": user_data.get('created_at'),
         "usage_stats": usage_stats,
         "features": plan_features
@@ -1957,7 +1944,7 @@ def home(user_data):
         "message": f"🎬 API de Streaming - {welcome_msg}",
         "version": "2.0.0",
         "user": user_data.get('username'),
-        "plan_type": user_data.get('plan_type', 'free'),
+        "plan_type": 'premium' if user_data.get('is_admin') else user_data.get('plan_type', 'free'),
         "firebase_status": "✅ Conectado" if db else "❌ Desconectado",
         "usage_limits": limits_info,
         "endpoints_available": {
@@ -1998,24 +1985,19 @@ def get_peliculas(user_data):
     try:
         limit = int(request.args.get('limit', 20))
         page = int(request.args.get('page', 1))
-        plan_type = user_data.get('plan_type', 'free')
         
-        # Admin no tiene límites
-        if user_data.get('is_admin'):
+        # Admin y premium no tienen límites
+        if user_data.get('is_admin') or user_data.get('plan_type') == 'premium':
             max_offset = 10000
             limit = min(limit, 100)
         else:
-            plan_config = PLAN_CONFIG[plan_type]
-            if plan_type == 'free':
-                limit = min(limit, 10)
-                max_offset = 50
-            else:
-                max_offset = 1000
+            limit = min(limit, 10)
+            max_offset = 50
         
         peliculas_ref = db.collection('peliculas')
         offset = (page - 1) * limit
         
-        if not user_data.get('is_admin') and plan_type == 'free' and offset >= max_offset:
+        if not user_data.get('is_admin') and user_data.get('plan_type') == 'free' and offset >= max_offset:
             return jsonify({
                 "success": True,
                 "count": 0,
@@ -2027,7 +2009,7 @@ def get_peliculas(user_data):
         peliculas = []
         for doc in docs:
             pelicula_data = normalize_movie_data(doc.to_dict(), doc.id)
-            if plan_type == 'free' and not user_data.get('is_admin'):
+            if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
                 pelicula_data = limit_content_info(pelicula_data, 'pelicula')
             peliculas.append(pelicula_data)
         
@@ -2036,7 +2018,7 @@ def get_peliculas(user_data):
             "count": len(peliculas),
             "page": page,
             "limit": limit,
-            "plan_restrictions": plan_type == 'free' and not user_data.get('is_admin'),
+            "plan_restrictions": user_data.get('plan_type') == 'free' and not user_data.get('is_admin'),
             "data": peliculas
         })
     except Exception as e:
@@ -2053,8 +2035,7 @@ def get_pelicula(user_data, pelicula_id):
         doc = doc_ref.get()
         if doc.exists:
             pelicula_data = normalize_movie_data(doc.to_dict(), doc.id)
-            plan_type = user_data.get('plan_type', 'free')
-            if plan_type == 'free' and not user_data.get('is_admin'):
+            if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
                 pelicula_data = limit_content_info(pelicula_data, 'pelicula')
             return jsonify({
                 "success": True,
@@ -2067,16 +2048,23 @@ def get_pelicula(user_data, pelicula_id):
 
 @app.route('/api/series', methods=['GET'])
 @token_required
-@check_plan_feature('content_access')
 def get_series(user_data):
+    """Obtener todas las series (Admin y Premium)"""
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
+    
+    # Verificar permisos
+    if not user_data.get('is_admin') and user_data.get('plan_type') != 'premium':
+        return jsonify({
+            "error": "Se requiere plan premium para acceder a series",
+            "upgrade_required": True,
+            "current_plan": user_data.get('plan_type', 'free'),
+            "required_plan": "premium"
+        }), 403
+    
     try:
         limit = int(request.args.get('limit', 20))
-        # Admin puede ver más contenido
-        if user_data.get('is_admin'):
-            limit = min(limit, 100)
         series_ref = db.collection('contenido')
         docs = series_ref.limit(limit).stream()
         series = []
@@ -2095,11 +2083,21 @@ def get_series(user_data):
 
 @app.route('/api/series/<serie_id>', methods=['GET'])
 @token_required
-@check_plan_feature('content_access')
 def get_serie(user_data, serie_id):
+    """Obtener serie específica (Admin y Premium)"""
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
+    
+    # Verificar permisos
+    if not user_data.get('is_admin') and user_data.get('plan_type') != 'premium':
+        return jsonify({
+            "error": "Se requiere plan premium para acceder a series",
+            "upgrade_required": True,
+            "current_plan": user_data.get('plan_type', 'free'),
+            "required_plan": "premium"
+        }), 403
+    
     try:
         doc_ref = db.collection('contenido').document(serie_id)
         doc = doc_ref.get()
@@ -2170,13 +2168,11 @@ def buscar(user_data):
         if not termino:
             return jsonify({"error": "Término de búsqueda requerido"}), 400
         
-        # Para admin, búsqueda ilimitada
-        if user_data.get('is_admin'):
-            search_limit = 1000
+        # Para admin y premium, búsqueda más amplia
+        if user_data.get('is_admin') or user_data.get('plan_type') == 'premium':
+            search_limit = 50
         else:
-            plan_type = user_data.get('plan_type', 'free')
-            plan_config = PLAN_CONFIG[plan_type]
-            search_limit = plan_config['features']['search_limit']
+            search_limit = 5
         
         limit = min(int(request.args.get('limit', 10)), search_limit)
         resultados = []
@@ -2209,8 +2205,7 @@ def buscar(user_data):
             "termino": termino,
             "count": len(resultados),
             "search_limit": search_limit,
-            "plan_type": user_data.get('plan_type', 'free'),
-            "is_admin": user_data.get('is_admin', False),
+            "plan_type": 'premium' if user_data.get('is_admin') else user_data.get('plan_type', 'free'),
             "data": resultados
         })
     except Exception as e:
@@ -2218,11 +2213,21 @@ def buscar(user_data):
 
 @app.route('/api/stream/<content_id>', methods=['GET'])
 @token_required
-@check_plan_feature('streaming')
 def get_stream_url(user_data, content_id):
+    """Obtener URL de streaming (Solo Premium y Admin)"""
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
+    
+    # Verificar permisos
+    if not user_data.get('is_admin') and user_data.get('plan_type') != 'premium':
+        return jsonify({
+            "error": "Se requiere plan premium para acceder a streaming",
+            "upgrade_required": True,
+            "current_plan": user_data.get('plan_type', 'free'),
+            "required_plan": "premium"
+        }), 403
+    
     try:
         content_ref = db.collection('peliculas').document(content_id)
         content_doc = content_ref.get()
