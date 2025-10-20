@@ -643,10 +643,12 @@ def check_ip_rate_limit(ip_address):
 
 # Función para verificar rate limiting por usuario
 def check_user_rate_limit(user_data):
-    user_id = user_data.get('user_id')
-    plan_type = user_data.get('plan_type', 'free')
+    # Admin no tiene rate limiting
     if user_data.get('is_admin'):
         return None
+        
+    user_id = user_data.get('user_id')
+    plan_type = user_data.get('plan_type', 'free')
     current_time = time.time()
     plan_config = PLAN_CONFIG[plan_type]
     with request_lock:
@@ -667,8 +669,10 @@ def check_user_rate_limit(user_data):
 
 # Función para verificar y actualizar límites de uso
 def check_usage_limits(user_data):
+    # Admin no tiene límites de uso
     if user_data.get('is_admin'):
         return None
+        
     user_id = user_data.get('user_id')
     if not user_id:
         return {"error": "ID de usuario no válido"}, 401
