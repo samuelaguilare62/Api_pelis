@@ -653,6 +653,81 @@ def normalize_id(title):
     
     return normalized
 
+# FUNCIÓN ACTUALIZADA: Mostrar opciones de streaming para usuarios free (INCLUYENDO ENLACES)
+def limit_content_info(content_data, content_type):
+    """Limitar información para usuarios free, pero MOSTRAR ENLACES DE STREAMING"""
+    limited_data = {
+        'id': content_data.get('id'),
+        'title': content_data.get('title'),
+        'year': content_data.get('year'),
+        'genre': content_data.get('genre'),
+        'rating': content_data.get('rating'),
+        'poster': content_data.get('poster'),
+        'description': content_data.get('description', '')[:100] + '...' if content_data.get('description') else ''
+    }
+    
+    # ✅ MODIFICACIÓN: INCLUIR ENLACES DE STREAMING PARA USUARIOS FREE
+    if content_type == 'pelicula':
+        play_links = content_data.get('play_links', [])
+        if play_links:
+            limited_data['streaming_available'] = True
+            limited_data['streaming_options_count'] = len(play_links)
+            limited_data['streaming_servers'] = [link.get('server', 'Unknown') for link in play_links]
+            # ✅ NUEVO: INCLUIR LOS ENLACES REALES
+            limited_data['play_links'] = play_links
+        else:
+            limited_data['streaming_available'] = False
+            
+    elif content_type == 'serie':
+        seasons = content_data.get('seasons', [])
+        if seasons:
+            limited_data['streaming_available'] = True
+            limited_data['total_seasons'] = len(seasons)
+            limited_data['total_episodes'] = sum(season.get('episode_count', 0) for season in seasons)
+            # ✅ NUEVO: INCLUIR INFORMACIÓN DE TEMPORADAS CON ENLACES
+            limited_data['seasons'] = []
+            for season in seasons[:2]:  # Mostrar solo primeras 2 temporadas para free
+                season_info = {
+                    'season_number': season.get('season_number'),
+                    'episode_count': season.get('episode_count'),
+                    'episodes_available': len(season.get('episodes', []))
+                }
+                # Incluir episodios con enlaces (limitado)
+                episodes_with_links = []
+                for episode in season.get('episodes', [])[:3]:  # Máximo 3 episodios por temporada
+                    if episode.get('play_links'):
+                        episode_info = {
+                            'episode_number': episode.get('episode_number'),
+                            'title': episode.get('title'),
+                            'play_links': episode.get('play_links', [])
+                        }
+                        episodes_with_links.append(episode_info)
+                if episodes_with_links:
+                    season_info['episodes'] = episodes_with_links
+                limited_data['seasons'].append(season_info)
+        else:
+            limited_data['streaming_available'] = False
+            
+    elif content_type == 'canal':
+        stream_options = content_data.get('stream_options', [])
+        if stream_options:
+            limited_data['streaming_available'] = True
+            limited_data['streaming_options_count'] = len(stream_options)
+            limited_data['streaming_servers'] = [option.get('option_name', 'Unknown') for option in stream_options[:3]]
+            # ✅ NUEVO: INCLUIR OPCIONES DE STREAMING
+            limited_data['stream_options'] = stream_options[:3]  # Máximo 3 opciones para free
+        else:
+            limited_data['streaming_available'] = False
+    
+    # Información sobre límites para free
+    limited_data['upgrade_required_for_unlimited'] = True
+    limited_data['free_plan_limits'] = {
+        'daily_streams': PLAN_CONFIG['free']['daily_streams_limit'],
+        'message': f'Límite: {PLAN_CONFIG["free"]["daily_streams_limit"]} reproducciones por día'
+    }
+    
+    return limited_data
+
 # Decorador para verificar Firebase
 def check_firebase():
     if not check_firebase_connection():
@@ -869,65 +944,6 @@ def check_usage_limits(user_data):
     except Exception as e:
         print(f"Error verificando límites de uso: {e}")
         return {"error": f"Error interno verificando límites: {str(e)}"}, 500
-
-# FUNCIÓN ACTUALIZADA: Mostrar opciones de streaming para usuarios free
-def limit_content_info(content_data, content_type):
-    """Limitar información para usuarios free, pero mostrar opciones de streaming"""
-    limited_data = {
-        'id': content_data.get('id'),
-        'title': content_data.get('title'),
-        'year': content_data.get('year'),
-        'genre': content_data.get('genre'),
-        'rating': content_data.get('rating'),
-        'poster': content_data.get('poster'),
-        'description': content_data.get('description', '')[:100] + '...' if content_data.get('description') else ''
-    }
-    
-    # Mostrar información de streaming disponible
-    if content_type == 'pelicula':
-        play_links = content_data.get('play_links', [])
-        if play_links:
-            limited_data['streaming_available'] = True
-            limited_data['streaming_options_count'] = len(play_links)
-            limited_data['streaming_servers'] = [link.get('server', 'Unknown') for link in play_links]
-        else:
-            limited_data['streaming_available'] = False
-            
-    elif content_type == 'serie':
-        seasons = content_data.get('seasons', [])
-        if seasons:
-            limited_data['streaming_available'] = True
-            limited_data['total_seasons'] = len(seasons)
-            limited_data['total_episodes'] = sum(season.get('episode_count', 0) for season in seasons)
-            # Mostrar información básica de temporadas
-            limited_data['seasons_info'] = [
-                {
-                    'season_number': season.get('season_number'),
-                    'episode_count': season.get('episode_count'),
-                    'episodes_available': len(season.get('episodes', []))
-                }
-                for season in seasons[:2]  # Mostrar solo primeras 2 temporadas para free
-            ]
-        else:
-            limited_data['streaming_available'] = False
-            
-    elif content_type == 'canal':
-        stream_options = content_data.get('stream_options', [])
-        if stream_options:
-            limited_data['streaming_available'] = True
-            limited_data['streaming_options_count'] = len(stream_options)
-            limited_data['streaming_servers'] = [option.get('option_name', 'Unknown') for option in stream_options[:3]]  # Máximo 3 servidores
-        else:
-            limited_data['streaming_available'] = False
-    
-    # Información sobre límites para free
-    limited_data['upgrade_required_for_unlimited'] = True
-    limited_data['free_plan_limits'] = {
-        'daily_streams': PLAN_CONFIG['free']['daily_streams_limit'],
-        'message': f'Límite: {PLAN_CONFIG["free"]["daily_streams_limit"]} reproducciones por día'
-    }
-    
-    return limited_data
 
 # Middleware de seguridad global
 @app.before_request
@@ -1948,7 +1964,7 @@ def delete_canal(user_data, canal_id):
         
         return jsonify({
             "success": True,
-            "message": "Canal eliminado exitosamente",
+            "message": "Canal eliminada exitosamente",
             "id": canal_id
         })
         
@@ -2214,6 +2230,7 @@ def get_peliculas(user_data):
         peliculas = []
         for doc in docs:
             pelicula_data = normalize_movie_data(doc.to_dict(), doc.id)
+            # ✅ MODIFICADO: Usuarios free ven los enlaces pero con límites de uso
             if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
                 pelicula_data = limit_content_info(pelicula_data, 'pelicula')
             peliculas.append(pelicula_data)
@@ -2240,6 +2257,7 @@ def get_pelicula(user_data, pelicula_id):
         doc = doc_ref.get()
         if doc.exists:
             pelicula_data = normalize_movie_data(doc.to_dict(), doc.id)
+            # ✅ MODIFICADO: Usuarios free ven los enlaces pero con límites de uso
             if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
                 pelicula_data = limit_content_info(pelicula_data, 'pelicula')
             return jsonify({
