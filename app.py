@@ -129,19 +129,20 @@ db = initialize_firebase()
 # Colección para almacenar usuarios y tokens
 TOKENS_COLLECTION = "api_users"
 
-# Configuración de planes
+# Configuración de planes - ACTUALIZADA CON LÍMITES DE STREAMS
 PLAN_CONFIG = {
     'free': {
         'daily_limit': 200,
         'session_limit': 10,
         'rate_limit_per_minute': 15,
         'concurrent_requests': 1,
+        'daily_streams_limit': 10,  # NUEVO: Límite diario de streams para free
         'features': {
             'content_access': 'limited',
             'api_responses': 'basic',
             'search_limit': 5,
             'content_previews': True,
-            'streaming': False,
+            'streaming': True,  # MODIFICADO: Ahora free tiene streaming limitado
             'download_links': False,
             'api_support': 'community',
             'request_priority': 'low',
@@ -153,10 +154,11 @@ PLAN_CONFIG = {
         }
     },
     'premium': {
-        'daily_limit': 30000,       # antes 1000, ahora dura todo el día
-        'session_limit': 2000,      # antes 100
+        'daily_limit': 30000,
+        'session_limit': 2000,
         'rate_limit_per_minute': 120,
         'concurrent_requests': 3,
+        'daily_streams_limit': 0,  # 0 = ilimitado para premium
         'features': {
             'content_access': 'full',
             'api_responses': 'enhanced',
@@ -240,7 +242,7 @@ def send_email_async(to_email, subject, message):
     thread.daemon = True
     thread.start()
 
-# FUNCIÓN MEJORADA PARA NOTIFICAR LÍMITES ALCANZADOS
+# FUNCIÓN MEJORADA PARA NOTIFICAR LÍMITES ALCANZADOS - ACTUALIZADA CON STREAMS
 def notify_limit_reached(user_data, limit_type, current_usage, limit, reset_time):
     """Notificar automáticamente al usuario que alcanzó un límite usando su email registrado"""
     try:
@@ -251,7 +253,48 @@ def notify_limit_reached(user_data, limit_type, current_usage, limit, reset_time
             print("⚠️  No se puede notificar: usuario sin email")
             return
         print(f"📧 Preparando notificación para {user_email} - Límite: {limit_type}")
-        if limit_type == 'daily':
+        
+        if limit_type == 'daily_streams':
+            subject = f"🚫 Límite Diario de Streams Alcanzado - API Streaming"
+            message = f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+                    <h2 style="color: #e74c3c;">Hola {username},</h2>
+                    <p>Has alcanzado tu límite diario de reproducciones en nuestra API de Streaming.</p>
+                    <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                        <h3 style="color: #856404; margin-top: 0;">📊 Resumen de Uso:</h3>
+                        <ul style="list-style: none; padding: 0;">
+                            <li style="margin: 8px 0;"><strong>Plan Actual:</strong> {plan_type.upper()}</li>
+                            <li style="margin: 8px 0;"><strong>Límite Diario de Streams:</strong> {limit} reproducciones</li>
+                            <li style="margin: 8px 0;"><strong>Streams Hoy:</strong> {current_usage} reproducciones</li>
+                            <li style="margin: 8px 0;"><strong>Se reinicia en:</strong> {reset_time}</li>
+                        </ul>
+                    </div>
+                    <p>📺 <strong>¿Qué significa esto?</strong></p>
+                    <ul>
+                        <li>✅ Puedes seguir navegando por el catálogo</li>
+                        <li>✅ Puedes buscar contenido</li>
+                        <li>🚫 No puedes reproducir películas, series o canales hasta mañana</li>
+                    </ul>
+                    <p>💡 <strong>¿Necesitas más streams?</strong> Considera actualizar a nuestro plan PREMIUM para obtener:</p>
+                    <ul>
+                        <li>✅ Streaming ilimitado las 24/7</li>
+                        <li>✅ Acceso completo a series y contenido exclusivo</li>
+                        <li>✅ Streaming HD sin interrupciones</li>
+                        <li>✅ Soporte prioritario 24/7</li>
+                    </ul>
+                    <p style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee;">
+                        Si tienes alguna pregunta, no dudes en contactarnos.
+                    </p>
+                    <p style="color: #666; font-size: 14px;">
+                        Saludos,<br>El equipo de API Streaming
+                    </p>
+                </div>
+            </body>
+            </html>
+            """
+        elif limit_type == 'daily':
             subject = f"🚫 Límite Diario Alcanzado - API Streaming"
             message = f"""
             <html>
@@ -374,16 +417,16 @@ def notify_limit_reached(user_data, limit_type, current_usage, limit, reset_time
             """
         send_email_async(user_email, subject, message)
         print(f"✅ Notificación de {limit_type} enviada a {user_email}")
-        if limit_type == 'daily' and EMAIL_CONFIG.get('admin_email'):
-            admin_subject = f"🔔 Usuario alcanzó límite diario: {username}"
+        if limit_type == 'daily_streams' and EMAIL_CONFIG.get('admin_email'):
+            admin_subject = f"🔔 Usuario alcanzó límite diario de streams: {username}"
             admin_message = f"""
             <html>
             <body>
-                <h2>Notificación de Admin</h2>
-                <p>El usuario {username} ({user_email}) ha alcanzado su límite diario.</p>
+                <h2>Notificación de Admin - Límite de Streams</h2>
+                <p>El usuario {username} ({user_email}) ha alcanzado su límite diario de streams.</p>
                 <ul>
                     <li><strong>Plan:</strong> {plan_type}</li>
-                    <li><strong>Uso:</strong> {current_usage}/{limit}</li>
+                    <li><strong>Streams Hoy:</strong> {current_usage}/{limit}</li>
                     <li><strong>Reset en:</strong> {reset_time}</li>
                 </ul>
             </body>
@@ -666,6 +709,85 @@ def check_user_rate_limit(user_data):
             }, 429
         user_request_times[user_id].append(current_time)
     return None
+
+# NUEVA FUNCIÓN: Verificar y actualizar límites de streams
+def check_stream_limits(user_data):
+    """Verificar si el usuario ha alcanzado su límite diario de streams"""
+    # Admin y premium no tienen límites de streams
+    if user_data.get('is_admin') or user_data.get('plan_type') == 'premium':
+        return None
+        
+    user_id = user_data.get('user_id')
+    if not user_id:
+        return {"error": "ID de usuario no válido"}, 401
+    
+    try:
+        user_ref = db.collection(TOKENS_COLLECTION).document(user_id)
+        user_doc = user_ref.get()
+        if not user_doc.exists:
+            return {"error": "Usuario no encontrado"}, 401
+        
+        user_info = user_doc.to_dict()
+        current_time = time.time()
+        plan_type = user_info.get('plan_type', 'free')
+        plan_config = PLAN_CONFIG[plan_type]
+        
+        # Verificar límite diario de streams
+        daily_streams_limit = plan_config['daily_streams_limit']
+        last_streams_reset = user_info.get('daily_streams_reset_timestamp', 0)
+        daily_streams_used = user_info.get('daily_streams_used', 0)
+        
+        # Reiniciar contador si ha pasado un día
+        if current_time - last_streams_reset >= 86400:
+            update_data = {
+                'daily_streams_used': 0,
+                'daily_streams_reset_timestamp': current_time
+            }
+            user_ref.update(update_data)
+            daily_streams_used = 0
+        else:
+            daily_streams_used = user_info.get('daily_streams_used', 0)
+        
+        # Verificar si ha alcanzado el límite
+        if daily_streams_used >= daily_streams_limit:
+            time_remaining = 86400 - (current_time - last_streams_reset)
+            reset_time = f"{int(time_remaining // 3600)}h {int((time_remaining % 3600) // 60)}m"
+            
+            # Notificar al usuario
+            notify_limit_reached(
+                user_data, 
+                'daily_streams', 
+                daily_streams_used, 
+                daily_streams_limit, 
+                reset_time
+            )
+            
+            return {
+                "error": f"Límite diario de streams excedido ({daily_streams_used}/{daily_streams_limit})",
+                "limit_type": "daily_streams",
+                "current_usage": daily_streams_used,
+                "limit": daily_streams_limit,
+                "reset_in": reset_time,
+                "upgrade_required": True
+            }, 429
+        
+        # Incrementar contador de streams
+        update_data = {
+            'daily_streams_used': firestore.Increment(1),
+            'last_stream_used': firestore.SERVER_TIMESTAMP,
+            'total_streams_count': firestore.Increment(1)
+        }
+        
+        # Si es la primera vez, establecer timestamp de reset
+        if 'daily_streams_reset_timestamp' not in user_info:
+            update_data['daily_streams_reset_timestamp'] = current_time
+        
+        user_ref.update(update_data)
+        return None
+        
+    except Exception as e:
+        print(f"Error verificando límites de streams: {e}")
+        return {"error": f"Error interno verificando límites de streams: {str(e)}"}, 500
 
 # Función para verificar y actualizar límites de uso
 def check_usage_limits(user_data):
@@ -1014,7 +1136,8 @@ def diagnostic():
             "ip_restrictions": "✅ Activado",
             "token_authentication": "✅ Activado",
             "plan_restrictions": "✅ Activado",
-            "email_notifications": "✅ Activado"
+            "email_notifications": "✅ Activado",
+            "stream_limits": "✅ Activado"  # NUEVO: Sistema de límites de streams
         },
         "endpoints_working": {
             "diagnostic": "✅ /api/diagnostic",
@@ -1061,7 +1184,8 @@ def admin_create_user(user_data):
         plan_config = PLAN_CONFIG[plan_type]
         daily_limit = data.get('daily_limit', plan_config['daily_limit'])
         session_limit = data.get('session_limit', plan_config['session_limit'])
-        if daily_limit <= 0 or session_limit <= 0:
+        daily_streams_limit = data.get('daily_streams_limit', plan_config['daily_streams_limit'])
+        if daily_limit <= 0 or session_limit <= 0 or daily_streams_limit < 0:
             return jsonify({"error": "Los límites deben ser mayores a 0"}), 400
         token = generate_unique_token()
         current_time = time.time()
@@ -1077,10 +1201,14 @@ def admin_create_user(user_data):
             'total_usage_count': 0,
             'daily_usage_count': 0,
             'session_usage_count': 0,
+            'daily_streams_used': 0,  # NUEVO: Contador de streams
+            'total_streams_count': 0,  # NUEVO: Total de streams
             'daily_reset_timestamp': current_time,
+            'daily_streams_reset_timestamp': current_time,  # NUEVO: Reset de streams
             'session_start_timestamp': current_time,
             'max_requests_per_day': daily_limit,
             'max_requests_per_session': session_limit,
+            'max_daily_streams': daily_streams_limit,  # NUEVO: Límite de streams
             'features': plan_config['features']
         }
         user_ref = users_ref.document()
@@ -1096,7 +1224,8 @@ def admin_create_user(user_data):
                 "plan_type": plan_type,
                 "limits": {
                     "daily": daily_limit,
-                    "session": session_limit
+                    "session": session_limit,
+                    "daily_streams": daily_streams_limit  # NUEVO
                 },
                 "features": plan_config['features']
             }
@@ -1123,20 +1252,27 @@ def admin_get_users(user_data):
             user_info['plan_type'] = plan_type
             user_info['plan_limits'] = {
                 'daily': PLAN_CONFIG[plan_type]['daily_limit'],
-                'session': PLAN_CONFIG[plan_type]['session_limit']
+                'session': PLAN_CONFIG[plan_type]['session_limit'],
+                'daily_streams': PLAN_CONFIG[plan_type]['daily_streams_limit']  # NUEVO
             }
             current_time = time.time()
             daily_reset = user_info.get('daily_reset_timestamp', current_time)
             session_start = user_info.get('session_start_timestamp', current_time)
+            streams_reset = user_info.get('daily_streams_reset_timestamp', current_time)  # NUEVO
             daily_remaining = max(0, 86400 - (current_time - daily_reset))
             session_remaining = max(0, SESSION_TIMEOUT - (current_time - session_start))
+            streams_remaining = max(0, 86400 - (current_time - streams_reset))  # NUEVO
             user_info['limits_info'] = {
                 'daily_reset_in_seconds': int(daily_remaining),
                 'session_reset_in_seconds': int(session_remaining),
+                'streams_reset_in_seconds': int(streams_remaining),  # NUEVO
                 'daily_usage': user_info.get('daily_usage_count', 0),
                 'session_usage': user_info.get('session_usage_count', 0),
+                'daily_streams_used': user_info.get('daily_streams_used', 0),  # NUEVO
+                'total_streams_count': user_info.get('total_streams_count', 0),  # NUEVO
                 'daily_limit': user_info.get('max_requests_per_day', PLAN_CONFIG[plan_type]['daily_limit']),
-                'session_limit': user_info.get('max_requests_per_session', PLAN_CONFIG[plan_type]['session_limit'])
+                'session_limit': user_info.get('max_requests_per_session', PLAN_CONFIG[plan_type]['session_limit']),
+                'daily_streams_limit': user_info.get('max_daily_streams', PLAN_CONFIG[plan_type]['daily_streams_limit'])  # NUEVO
             }
             if 'token' in user_info:
                 del user_info['token']
@@ -1169,14 +1305,17 @@ def admin_update_limits(user_data):
         user_id = data.get('user_id')
         daily_limit = data.get('daily_limit')
         session_limit = data.get('session_limit')
+        daily_streams_limit = data.get('daily_streams_limit')  # NUEVO
         if not user_id:
             return jsonify({"error": "user_id es requerido"}), 400
-        if daily_limit is None and session_limit is None:
+        if daily_limit is None and session_limit is None and daily_streams_limit is None:
             return jsonify({"error": "Debe proporcionar al menos un límite para actualizar"}), 400
         if daily_limit is not None and daily_limit <= 0:
             return jsonify({"error": "El límite diario debe ser mayor a 0"}), 400
         if session_limit is not None and session_limit <= 0:
             return jsonify({"error": "El límite de sesión debe ser mayor a 0"}), 400
+        if daily_streams_limit is not None and daily_streams_limit < 0:
+            return jsonify({"error": "El límite de streams debe ser mayor o igual a 0"}), 400
         user_ref = db.collection(TOKENS_COLLECTION).document(user_id)
         user_doc = user_ref.get()
         if not user_doc.exists:
@@ -1186,6 +1325,8 @@ def admin_update_limits(user_data):
             update_data['max_requests_per_day'] = daily_limit
         if session_limit is not None:
             update_data['max_requests_per_session'] = session_limit
+        if daily_streams_limit is not None:
+            update_data['max_daily_streams'] = daily_streams_limit
         user_ref.update(update_data)
         return jsonify({
             "success": True,
@@ -1222,6 +1363,7 @@ def admin_change_plan(user_data):
             'plan_type': new_plan,
             'max_requests_per_day': plan_config['daily_limit'],
             'max_requests_per_session': plan_config['session_limit'],
+            'max_daily_streams': plan_config['daily_streams_limit'],  # NUEVO
             'features': plan_config['features'],
             'plan_updated_at': firestore.SERVER_TIMESTAMP
         }
@@ -1232,7 +1374,8 @@ def admin_change_plan(user_data):
             "new_plan": new_plan,
             "new_limits": {
                 "daily": plan_config['daily_limit'],
-                "session": plan_config['session_limit']
+                "session": plan_config['session_limit'],
+                "daily_streams": plan_config['daily_streams_limit']  # NUEVO
             },
             "new_features": plan_config['features']
         })
@@ -1267,6 +1410,9 @@ def admin_reset_limits(user_data):
         if reset_type in ['session', 'both']:
             update_data['session_usage_count'] = 0
             update_data['session_start_timestamp'] = current_time
+        if reset_type in ['streams', 'both']:  # NUEVO: Reset de streams
+            update_data['daily_streams_used'] = 0
+            update_data['daily_streams_reset_timestamp'] = current_time
         user_ref.update(update_data)
         return jsonify({
             "success": True,
@@ -1330,9 +1476,9 @@ def admin_usage_statistics(user_data):
         users_ref = db.collection(TOKENS_COLLECTION)
         docs = users_ref.stream()
         stats = {
-            'free': {'users': 0, 'total_requests': 0, 'active_users': 0},
-            'premium': {'users': 0, 'total_requests': 0, 'active_users': 0},
-            'total': {'users': 0, 'total_requests': 0, 'active_users': 0}
+            'free': {'users': 0, 'total_requests': 0, 'total_streams': 0, 'active_users': 0},
+            'premium': {'users': 0, 'total_requests': 0, 'total_streams': 0, 'active_users': 0},
+            'total': {'users': 0, 'total_requests': 0, 'total_streams': 0, 'active_users': 0}
         }
         current_time = time.time()
         for doc in docs:
@@ -1341,8 +1487,11 @@ def admin_usage_statistics(user_data):
             stats[plan_type]['users'] += 1
             stats['total']['users'] += 1
             total_requests = user_info.get('total_usage_count', 0)
+            total_streams = user_info.get('total_streams_count', 0)  # NUEVO
             stats[plan_type]['total_requests'] += total_requests
+            stats[plan_type]['total_streams'] += total_streams  # NUEVO
             stats['total']['total_requests'] += total_requests
+            stats['total']['total_streams'] += total_streams  # NUEVO
             last_used = user_info.get('last_used')
             if last_used:
                 if hasattr(last_used, 'timestamp'):
@@ -1355,8 +1504,10 @@ def admin_usage_statistics(user_data):
         for plan in ['free', 'premium', 'total']:
             if stats[plan]['users'] > 0:
                 stats[plan]['avg_requests_per_user'] = stats[plan]['total_requests'] / stats[plan]['users']
+                stats[plan]['avg_streams_per_user'] = stats[plan]['total_streams'] / stats[plan]['users']  # NUEVO
             else:
                 stats[plan]['avg_requests_per_user'] = 0
+                stats[plan]['avg_streams_per_user'] = 0
         return jsonify({
             "success": True,
             "statistics": stats,
@@ -1797,26 +1948,35 @@ def get_user_info(user_data):
             "total": user_data.get('total_usage_count', 0),
             "daily": "Ilimitado",
             "session": "Ilimitado",
+            "daily_streams": "Ilimitado",  # NUEVO
             "daily_limit": "Ilimitado",
             "session_limit": "Ilimitado",
+            "daily_streams_limit": "Ilimitado",  # NUEVO
             "daily_reset_in": "No aplica",
-            "session_reset_in": "No aplica"
+            "session_reset_in": "No aplica",
+            "streams_reset_in": "No aplica"  # NUEVO
         }
         plan_features = PLAN_CONFIG['premium']['features']
     else:
         daily_reset = user_data.get('daily_reset_timestamp', current_time)
         session_start = user_data.get('session_start_timestamp', current_time)
+        streams_reset = user_data.get('daily_streams_reset_timestamp', current_time)  # NUEVO
         daily_remaining = max(0, 86400 - (current_time - daily_reset))
         session_remaining = max(0, SESSION_TIMEOUT - (current_time - session_start))
+        streams_remaining = max(0, 86400 - (current_time - streams_reset))  # NUEVO
         plan_features = PLAN_CONFIG[plan_type]['features']
         usage_stats = {
             "total": user_data.get('total_usage_count', 0),
             "daily": user_data.get('daily_usage_count', 0),
             "session": user_data.get('session_usage_count', 0),
+            "daily_streams": user_data.get('daily_streams_used', 0),  # NUEVO
+            "total_streams": user_data.get('total_streams_count', 0),  # NUEVO
             "daily_limit": user_data.get('max_requests_per_day', PLAN_CONFIG[plan_type]['daily_limit']),
             "session_limit": user_data.get('max_requests_per_session', PLAN_CONFIG[plan_type]['session_limit']),
+            "daily_streams_limit": user_data.get('max_daily_streams', PLAN_CONFIG[plan_type]['daily_streams_limit']),  # NUEVO
             "daily_reset_in": f"{int(daily_remaining // 3600)}h {int((daily_remaining % 3600) // 60)}m",
-            "session_reset_in": f"{int(session_remaining // 60)}m {int(session_remaining % 60)}s"
+            "session_reset_in": f"{int(session_remaining // 60)}m {int(session_remaining % 60)}s",
+            "streams_reset_in": f"{int(streams_remaining // 3600)}h {int((streams_remaining % 3600) // 60)}m"  # NUEVO
         }
     
     user_response = {
@@ -1843,15 +2003,17 @@ def plan_comparison():
             'price': 'Gratuito',
             'daily_requests': PLAN_CONFIG['free']['daily_limit'],
             'session_requests': PLAN_CONFIG['free']['session_limit'],
+            'daily_streams': PLAN_CONFIG['free']['daily_streams_limit'],  # NUEVO
             'features': [
                 'Acceso a metadata básica',
                 'Búsqueda limitada (5 resultados)',
                 'Preview de contenido',
                 'Soporte comunitario',
-                'Límite de 50 películas visibles'
+                'Límite de 50 películas visibles',
+                f'Streaming limitado ({PLAN_CONFIG["free"]["daily_streams_limit"]} reproducciones/día)'  # NUEVO
             ],
             'limitations': [
-                'No streaming de video',
+                'No streaming de video ilimitado',
                 'No descargas',
                 'No acceso a series',
                 'Búsquedas limitadas',
@@ -1864,6 +2026,7 @@ def plan_comparison():
             'price': 'Personalizar',
             'daily_requests': PLAN_CONFIG['premium']['daily_limit'],
             'session_requests': PLAN_CONFIG['premium']['session_limit'],
+            'daily_streams': 'Ilimitado',  # NUEVO
             'features': [
                 'Acceso completo al catálogo',
                 'Streaming HD ilimitado',
@@ -1904,13 +2067,17 @@ def home(user_data):
                 current_data = user_doc.to_dict()
                 daily_usage = current_data.get('daily_usage_count', 0)
                 session_usage = current_data.get('session_usage_count', 0)
+                daily_streams_used = current_data.get('daily_streams_used', 0)  # NUEVO
                 daily_limit = current_data.get('max_requests_per_day', PLAN_CONFIG[user_data.get('plan_type', 'free')]['daily_limit'])
                 session_limit = current_data.get('max_requests_per_session', PLAN_CONFIG[user_data.get('plan_type', 'free')]['session_limit'])
+                daily_streams_limit = current_data.get('max_daily_streams', PLAN_CONFIG[user_data.get('plan_type', 'free')]['daily_streams_limit'])  # NUEVO
                 limits_info = {
                     "daily_usage": f"{daily_usage}/{daily_limit}",
                     "session_usage": f"{session_usage}/{session_limit}",
+                    "daily_streams_used": f"{daily_streams_used}/{daily_streams_limit}",  # NUEVO
                     "remaining_daily": daily_limit - daily_usage,
-                    "remaining_session": session_limit - session_usage
+                    "remaining_session": session_limit - session_usage,
+                    "remaining_streams": daily_streams_limit - daily_streams_used  # NUEVO
                 }
         except Exception as e:
             print(f"Error obteniendo información de límites: {e}")
@@ -1918,8 +2085,10 @@ def home(user_data):
         limits_info = {
             "daily_usage": "Ilimitado",
             "session_usage": "Ilimitado",
+            "daily_streams_used": "Ilimitado",  # NUEVO
             "remaining_daily": "Ilimitado",
-            "remaining_session": "Ilimitado"
+            "remaining_session": "Ilimitado",
+            "remaining_streams": "Ilimitado"  # NUEVO
         }
     
     # Agregar información de endpoints de creación/edición
@@ -1957,7 +2126,7 @@ def home(user_data):
             "canal_especifico": "GET /api/canales/<id>",
             "buscar": "GET /api/buscar?q=<termino>",
             "estadisticas": "GET /api/estadisticas",
-            "stream": "GET /api/stream/<id> (solo premium)",
+            "stream": "GET /api/stream/<id> (con límites para free)",
             "connection_status": "GET /api/connection/status",
             "health": "GET /health"
         },
@@ -2211,22 +2380,20 @@ def buscar(user_data):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ENDPOINT DE STREAM ACTUALIZADO CON LÍMITES
 @app.route('/api/stream/<content_id>', methods=['GET'])
 @token_required
 def get_stream_url(user_data, content_id):
-    """Obtener URL de streaming (Solo Premium y Admin)"""
+    """Obtener URL de streaming con límites diarios para free"""
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
     
-    # Verificar permisos
-    if not user_data.get('is_admin') and user_data.get('plan_type') != 'premium':
-        return jsonify({
-            "error": "Se requiere plan premium para acceder a streaming",
-            "upgrade_required": True,
-            "current_plan": user_data.get('plan_type', 'free'),
-            "required_plan": "premium"
-        }), 403
+    # Verificar límites de streams para usuarios free
+    if not user_data.get('is_admin') and user_data.get('plan_type') == 'free':
+        stream_limit_check = check_stream_limits(user_data)
+        if stream_limit_check:
+            return jsonify(stream_limit_check[0]), stream_limit_check[1]
     
     try:
         content_ref = db.collection('peliculas').document(content_id)
@@ -2249,13 +2416,24 @@ def get_stream_url(user_data, content_id):
                     "message": "Para series, especifique temporada y episodio",
                     "content_type": "serie"
                 }), 400
+            else:
+                content_ref = db.collection('canales').document(content_id)
+                content_doc = content_ref.get()
+                if content_doc.exists:
+                    content_data = normalize_channel_data(content_doc.to_dict(), content_id)
+                    content_type = "canal"
+                    stream_options = content_data.get('stream_options', [])
+                    if stream_options:
+                        streaming_url = stream_options[0].get('stream_url')
+        
         if streaming_url:
             return jsonify({
                 "success": True,
                 "streaming_url": streaming_url,
                 "content_type": content_type,
                 "expires_in": 3600,
-                "quality": "HD"
+                "quality": "HD",
+                "stream_counted": True if not user_data.get('is_admin') and user_data.get('plan_type') == 'free' else False
             })
         else:
             return jsonify({"error": "URL de streaming no disponible"}), 404
