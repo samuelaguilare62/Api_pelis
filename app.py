@@ -870,8 +870,9 @@ def check_usage_limits(user_data):
         print(f"Error verificando límites de uso: {e}")
         return {"error": f"Error interno verificando límites: {str(e)}"}, 500
 
-# Función para limitar información de contenido para usuarios free
+# FUNCIÓN ACTUALIZADA: Mostrar opciones de streaming para usuarios free
 def limit_content_info(content_data, content_type):
+    """Limitar información para usuarios free, pero mostrar opciones de streaming"""
     limited_data = {
         'id': content_data.get('id'),
         'title': content_data.get('title'),
@@ -881,16 +882,51 @@ def limit_content_info(content_data, content_type):
         'poster': content_data.get('poster'),
         'description': content_data.get('description', '')[:100] + '...' if content_data.get('description') else ''
     }
-    if 'streaming_url' in content_data:
-        limited_data['streaming_available'] = True
-        limited_data['upgrade_required'] = True
-    else:
-        limited_data['streaming_available'] = False
-    if 'download_links' in content_data:
-        limited_data['downloads_available'] = True
-        limited_data['upgrade_required'] = True
-    else:
-        limited_data['downloads_available'] = False
+    
+    # Mostrar información de streaming disponible
+    if content_type == 'pelicula':
+        play_links = content_data.get('play_links', [])
+        if play_links:
+            limited_data['streaming_available'] = True
+            limited_data['streaming_options_count'] = len(play_links)
+            limited_data['streaming_servers'] = [link.get('server', 'Unknown') for link in play_links]
+        else:
+            limited_data['streaming_available'] = False
+            
+    elif content_type == 'serie':
+        seasons = content_data.get('seasons', [])
+        if seasons:
+            limited_data['streaming_available'] = True
+            limited_data['total_seasons'] = len(seasons)
+            limited_data['total_episodes'] = sum(season.get('episode_count', 0) for season in seasons)
+            # Mostrar información básica de temporadas
+            limited_data['seasons_info'] = [
+                {
+                    'season_number': season.get('season_number'),
+                    'episode_count': season.get('episode_count'),
+                    'episodes_available': len(season.get('episodes', []))
+                }
+                for season in seasons[:2]  # Mostrar solo primeras 2 temporadas para free
+            ]
+        else:
+            limited_data['streaming_available'] = False
+            
+    elif content_type == 'canal':
+        stream_options = content_data.get('stream_options', [])
+        if stream_options:
+            limited_data['streaming_available'] = True
+            limited_data['streaming_options_count'] = len(stream_options)
+            limited_data['streaming_servers'] = [option.get('option_name', 'Unknown') for option in stream_options[:3]]  # Máximo 3 servidores
+        else:
+            limited_data['streaming_available'] = False
+    
+    # Información sobre límites para free
+    limited_data['upgrade_required_for_unlimited'] = True
+    limited_data['free_plan_limits'] = {
+        'daily_streams': PLAN_CONFIG['free']['daily_streams_limit'],
+        'message': f'Límite: {PLAN_CONFIG["free"]["daily_streams_limit"]} reproducciones por día'
+    }
+    
     return limited_data
 
 # Middleware de seguridad global
@@ -2215,22 +2251,14 @@ def get_pelicula(user_data, pelicula_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ENDPOINT ACTUALIZADO: Series para todos los usuarios
 @app.route('/api/series', methods=['GET'])
 @token_required
 def get_series(user_data):
-    """Obtener todas las series (Admin y Premium)"""
+    """Obtener todas las series (todos los usuarios)"""
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
-    
-    # Verificar permisos
-    if not user_data.get('is_admin') and user_data.get('plan_type') != 'premium':
-        return jsonify({
-            "error": "Se requiere plan premium para acceder a series",
-            "upgrade_required": True,
-            "current_plan": user_data.get('plan_type', 'free'),
-            "required_plan": "premium"
-        }), 403
     
     try:
         limit = int(request.args.get('limit', 20))
@@ -2241,10 +2269,15 @@ def get_series(user_data):
             serie_data = doc.to_dict()
             if serie_data.get('seasons'):
                 serie_data = normalize_series_data(serie_data, doc.id)
+                # Para usuarios free, limitar información pero mostrar disponibilidad
+                if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
+                    serie_data = limit_content_info(serie_data, 'serie')
                 series.append(serie_data)
+        
         return jsonify({
             "success": True,
             "count": len(series),
+            "plan_restrictions": user_data.get('plan_type') == 'free' and not user_data.get('is_admin'),
             "data": series
         })
     except Exception as e:
@@ -2253,19 +2286,10 @@ def get_series(user_data):
 @app.route('/api/series/<serie_id>', methods=['GET'])
 @token_required
 def get_serie(user_data, serie_id):
-    """Obtener serie específica (Admin y Premium)"""
+    """Obtener serie específica (todos los usuarios)"""
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
-    
-    # Verificar permisos
-    if not user_data.get('is_admin') and user_data.get('plan_type') != 'premium':
-        return jsonify({
-            "error": "Se requiere plan premium para acceder a series",
-            "upgrade_required": True,
-            "current_plan": user_data.get('plan_type', 'free'),
-            "required_plan": "premium"
-        }), 403
     
     try:
         doc_ref = db.collection('contenido').document(serie_id)
@@ -2274,6 +2298,9 @@ def get_serie(user_data, serie_id):
             serie_data = doc.to_dict()
             if serie_data.get('seasons'):
                 serie_data = normalize_series_data(serie_data, doc.id)
+                # Para usuarios free, limitar información pero mostrar disponibilidad
+                if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
+                    serie_data = limit_content_info(serie_data, 'serie')
                 return jsonify({
                     "success": True,
                     "data": serie_data
@@ -2297,10 +2324,14 @@ def get_canales(user_data):
         canales = []
         for doc in docs:
             canal_data = normalize_channel_data(doc.to_dict(), doc.id)
+            # Para usuarios free, limitar información pero mostrar disponibilidad
+            if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
+                canal_data = limit_content_info(canal_data, 'canal')
             canales.append(canal_data)
         return jsonify({
             "success": True,
             "count": len(canales),
+            "plan_restrictions": user_data.get('plan_type') == 'free' and not user_data.get('is_admin'),
             "data": canales
         })
     except Exception as e:
@@ -2317,6 +2348,9 @@ def get_canal(user_data, canal_id):
         doc = doc_ref.get()
         if doc.exists:
             canal_data = normalize_channel_data(doc.to_dict(), doc.id)
+            # Para usuarios free, limitar información pero mostrar disponibilidad
+            if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
+                canal_data = limit_content_info(canal_data, 'canal')
             return jsonify({
                 "success": True,
                 "data": canal_data
@@ -2357,17 +2391,18 @@ def buscar(user_data):
                 data = limit_content_info(data, 'pelicula')
             resultados.append(data)
         
-        # Solo premium y admin pueden buscar series
-        if user_data.get('is_admin') or user_data.get('plan_type') == 'premium':
-            series_ref = db.collection('contenido')
-            series_query = series_ref.where('title', '>=', termino).where('title', '<=', termino + '\uf8ff')
-            series_docs = series_query.limit(limit).stream()
-            for doc in series_docs:
-                data = doc.to_dict()
-                if data.get('seasons'):
-                    data = normalize_series_data(data, doc.id)
-                    data['tipo'] = 'serie'
-                    resultados.append(data)
+        # Todos los usuarios pueden buscar series ahora
+        series_ref = db.collection('contenido')
+        series_query = series_ref.where('title', '>=', termino).where('title', '<=', termino + '\uf8ff')
+        series_docs = series_query.limit(limit).stream()
+        for doc in series_docs:
+            data = doc.to_dict()
+            if data.get('seasons'):
+                data = normalize_series_data(data, doc.id)
+                data['tipo'] = 'serie'
+                if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
+                    data = limit_content_info(data, 'serie')
+                resultados.append(data)
         
         return jsonify({
             "success": True,
@@ -2411,11 +2446,38 @@ def get_stream_url(user_data, content_id):
             if content_doc.exists:
                 content_data = content_doc.to_dict()
                 content_type = "serie"
-                return jsonify({
-                    "success": False,
-                    "message": "Para series, especifique temporada y episodio",
-                    "content_type": "serie"
-                }), 400
+                # Para series, se necesita especificar temporada y episodio
+                season = request.args.get('season')
+                episode = request.args.get('episode')
+                
+                if not season or not episode:
+                    return jsonify({
+                        "success": False,
+                        "message": "Para series, especifique temporada y episodio",
+                        "content_type": "serie",
+                        "parameters_required": {
+                            "season": "número de temporada",
+                            "episode": "número de episodio"
+                        }
+                    }), 400
+                
+                # Buscar el episodio específico
+                seasons = content_data.get('seasons', {})
+                season_key = f"season-{season}"
+                if season_key in seasons:
+                    episodes = seasons[season_key].get('episodes', {})
+                    episode_key = f"episode-{episode}"
+                    if episode_key in episodes:
+                        episode_data = episodes[episode_key]
+                        play_links = episode_data.get('play_links', [])
+                        if play_links:
+                            streaming_url = play_links[0].get('url')
+                        else:
+                            return jsonify({"error": "Episodio sin enlaces de streaming"}), 404
+                    else:
+                        return jsonify({"error": "Episodio no encontrado"}), 404
+                else:
+                    return jsonify({"error": "Temporada no encontrada"}), 404
             else:
                 content_ref = db.collection('canales').document(content_id)
                 content_doc = content_ref.get()
@@ -2449,21 +2511,21 @@ def get_estadisticas(user_data):
     try:
         peliculas_count = len(list(db.collection('peliculas').limit(1000).stream()))
         series_count = 0
-        if user_data.get('is_admin') or user_data.get('plan_type') == 'premium':
-            series_ref = db.collection('contenido')
-            series_docs = series_ref.limit(1000).stream()
-            for doc in series_docs:
-                data = doc.to_dict()
-                if data.get('seasons'):
-                    series_count += 1
+        # Todos los usuarios pueden ver estadísticas de series ahora
+        series_ref = db.collection('contenido')
+        series_docs = series_ref.limit(1000).stream()
+        for doc in series_docs:
+            data = doc.to_dict()
+            if data.get('seasons'):
+                series_count += 1
         canales_count = len(list(db.collection('canales').limit(1000).stream()))
         return jsonify({
             "success": True,
             "data": {
                 "total_peliculas": peliculas_count,
-                "total_series": series_count if (user_data.get('is_admin') or user_data.get('plan_type') == 'premium') else "Requiere plan premium",
+                "total_series": series_count,
                 "total_canales": canales_count,
-                "total_contenido": peliculas_count + series_count if (user_data.get('is_admin') or user_data.get('plan_type') == 'premium') else "Requiere plan premium"
+                "total_contenido": peliculas_count + series_count
             }
         })
     except Exception as e:
