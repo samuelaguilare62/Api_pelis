@@ -1,3 +1,5 @@
+[file name]: app.py
+[file content begin]
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import firebase_admin
@@ -766,6 +768,69 @@ def check_domain_restriction(user_data):
     
     return None
 
+# NUEVA FUNCIÓN: Verificación de colecciones permitidas para tokens web
+def check_collection_access(user_data, collection_name):
+    """Verificar si el token tiene acceso a la colección solicitada"""
+    # Admin siempre tiene acceso a todas las colecciones
+    if user_data.get('is_admin'):
+        return None
+    
+    # Para tokens normales (no frontend), usar reglas del plan
+    if not user_data.get('is_frontend_token'):
+        return None
+    
+    # Para tokens frontend, verificar colecciones permitidas
+    allowed_collections = user_data.get('allowed_collections', [])
+    if not allowed_collections:
+        return {
+            "error": "Token de frontend sin colecciones configuradas",
+            "solution": "Contacte al administrador para configurar las colecciones permitidas"
+        }, 403
+    
+    if collection_name not in allowed_collections:
+        return {
+            "error": f"Acceso denegado a la colección '{collection_name}'",
+            "allowed_collections": allowed_collections,
+            "your_request": collection_name
+        }, 403
+    
+    return None
+
+# NUEVA FUNCIÓN: Verificación de permisos de escritura para tokens web
+def check_content_permissions(user_data, action):
+    """Verificar permisos de creación/edición/eliminación para tokens web"""
+    # Admin siempre tiene todos los permisos
+    if user_data.get('is_admin'):
+        return None
+    
+    # Para tokens normales, usar reglas del plan
+    if not user_data.get('is_frontend_token'):
+        return None
+    
+    # Para tokens frontend, verificar permisos específicos
+    if action == 'create' and not user_data.get('can_create_content', False):
+        return {
+            "error": "Permiso denegado para crear contenido",
+            "required_permission": "can_create_content",
+            "solution": "Contacte al administrador para habilitar este permiso"
+        }, 403
+    
+    if action == 'edit' and not user_data.get('can_edit_content', False):
+        return {
+            "error": "Permiso denegado para editar contenido",
+            "required_permission": "can_edit_content", 
+            "solution": "Contacte al administrador para habilitar este permiso"
+        }, 403
+    
+    if action == 'delete' and not user_data.get('can_delete_content', False):
+        return {
+            "error": "Permiso denegado para eliminar contenido",
+            "required_permission": "can_delete_content",
+            "solution": "Contacte al administrador para habilitar este permiso"
+        }, 403
+    
+    return None
+
 # Decorador para verificar Firebase
 def check_firebase():
     if not check_firebase_connection():
@@ -1234,7 +1299,8 @@ def diagnostic():
             "plan_restrictions": "✅ Activado",
             "email_notifications": "✅ Activado",
             "stream_limits": "✅ Activado",
-            "domain_restrictions": "✅ Activado"  # NUEVO: Restricciones por dominio
+            "domain_restrictions": "✅ Activado",
+            "collection_access_control": "✅ Activado"  # NUEVO: Control de colecciones
         },
         "endpoints_working": {
             "diagnostic": "✅ /api/diagnostic",
@@ -1269,6 +1335,12 @@ def admin_create_user(user_data):
         allowed_domains = data.get('allowed_domains', [])  # NUEVO: Dominios permitidos
         is_frontend_token = data.get('is_frontend_token', False)  # NUEVO: Identificar tokens para frontend
         
+        # ✅ NUEVO: Campos de control de colecciones para tokens frontend
+        allowed_collections = data.get('allowed_collections', ['peliculas'])
+        can_create_content = data.get('can_create_content', False)
+        can_edit_content = data.get('can_edit_content', False)
+        can_delete_content = data.get('can_delete_content', False)
+        
         if not username or not email:
             return jsonify({"error": "Username y email son requeridos"}), 400
         if not validate_username(username):
@@ -1281,6 +1353,18 @@ def admin_create_user(user_data):
         # Validar formato de dominios permitidos
         if allowed_domains and not isinstance(allowed_domains, list):
             return jsonify({"error": "allowed_domains debe ser una lista de URLs"}), 400
+        
+        # ✅ NUEVO: Validar colecciones permitidas
+        valid_collections = ['peliculas', 'contenido', 'canales']
+        if not isinstance(allowed_collections, list):
+            return jsonify({"error": "allowed_collections debe ser una lista"}), 400
+        
+        for collection in allowed_collections:
+            if collection not in valid_collections:
+                return jsonify({
+                    "error": f"Colección no válida: {collection}",
+                    "colecciones_válidas": valid_collections
+                }), 400
         
         users_ref = db.collection(TOKENS_COLLECTION)
         existing_user = users_ref.where('email', '==', email).limit(1).stream()
@@ -1321,7 +1405,18 @@ def admin_create_user(user_data):
             'features': plan_config['features'],
             # NUEVO: Campos agregados
             'allowed_domains': allowed_domains,
-            'is_frontend_token': is_frontend_token
+            'is_frontend_token': is_frontend_token,
+            # ✅ NUEVO: Campos de control de colecciones
+            'allowed_collections': allowed_collections,
+            'can_create_content': can_create_content,
+            'can_edit_content': can_edit_content,
+            'can_delete_content': can_delete_content,
+            'frontend_permissions': {
+                'collections_access': allowed_collections,
+                'content_creation': can_create_content,
+                'content_editing': can_edit_content,
+                'content_deletion': can_delete_content
+            }
         }
         
         user_ref = users_ref.document()
@@ -1338,6 +1433,12 @@ def admin_create_user(user_data):
                 "plan_type": plan_type,
                 "allowed_domains": allowed_domains,
                 "is_frontend_token": is_frontend_token,
+                "allowed_collections": allowed_collections,
+                "content_permissions": {
+                    "create": can_create_content,
+                    "edit": can_edit_content,
+                    "delete": can_delete_content
+                },
                 "limits": {
                     "daily": daily_limit,
                     "session": session_limit,
@@ -1423,10 +1524,15 @@ def admin_update_limits(user_data):
         session_limit = data.get('session_limit')
         daily_streams_limit = data.get('daily_streams_limit')
         allowed_domains = data.get('allowed_domains')  # NUEVO: Actualizar dominios
+        # ✅ NUEVO: Campos de control de colecciones
+        allowed_collections = data.get('allowed_collections')
+        can_create_content = data.get('can_create_content')
+        can_edit_content = data.get('can_edit_content') 
+        can_delete_content = data.get('can_delete_content')
         
         if not user_id:
             return jsonify({"error": "user_id es requerido"}), 400
-        if daily_limit is None and session_limit is None and daily_streams_limit is None and allowed_domains is None:
+        if daily_limit is None and session_limit is None and daily_streams_limit is None and allowed_domains is None and allowed_collections is None and can_create_content is None and can_edit_content is None and can_delete_content is None:
             return jsonify({"error": "Debe proporcionar al menos un campo para actualizar"}), 400
         if daily_limit is not None and daily_limit <= 0:
             return jsonify({"error": "El límite diario debe ser mayor a 0"}), 400
@@ -1434,6 +1540,18 @@ def admin_update_limits(user_data):
             return jsonify({"error": "El límite de sesión debe ser mayor a 0"}), 400
         if daily_streams_limit is not None and daily_streams_limit < 0:
             return jsonify({"error": "El límite de streams debe ser mayor o igual a 0"}), 400
+        
+        # ✅ NUEVO: Validar colecciones permitidas si se proporcionan
+        if allowed_collections is not None:
+            valid_collections = ['peliculas', 'contenido', 'canales']
+            if not isinstance(allowed_collections, list):
+                return jsonify({"error": "allowed_collections debe ser una lista"}), 400
+            for collection in allowed_collections:
+                if collection not in valid_collections:
+                    return jsonify({
+                        "error": f"Colección no válida: {collection}",
+                        "colecciones_válidas": valid_collections
+                    }), 400
         
         user_ref = db.collection(TOKENS_COLLECTION).document(user_id)
         user_doc = user_ref.get()
@@ -1449,6 +1567,19 @@ def admin_update_limits(user_data):
             update_data['max_daily_streams'] = daily_streams_limit
         if allowed_domains is not None:  # NUEVO: Actualizar dominios
             update_data['allowed_domains'] = allowed_domains
+        # ✅ NUEVO: Actualizar campos de control de colecciones
+        if allowed_collections is not None:
+            update_data['allowed_collections'] = allowed_collections
+            update_data['frontend_permissions.collections_access'] = allowed_collections
+        if can_create_content is not None:
+            update_data['can_create_content'] = can_create_content
+            update_data['frontend_permissions.content_creation'] = can_create_content
+        if can_edit_content is not None:
+            update_data['can_edit_content'] = can_edit_content
+            update_data['frontend_permissions.content_editing'] = can_edit_content
+        if can_delete_content is not None:
+            update_data['can_delete_content'] = can_delete_content
+            update_data['frontend_permissions.content_deletion'] = can_delete_content
         
         user_ref.update(update_data)
         return jsonify({
@@ -1640,11 +1771,11 @@ def admin_usage_statistics(user_data):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# NUEVO ENDPOINT: Generar token para frontend
+# NUEVO ENDPOINT MEJORADO: Generar token para frontend con control de colecciones
 @app.route('/api/generate-frontend-token', methods=['POST'])
 @token_required
 def generate_frontend_token(user_data):
-    """Generar token seguro específico para frontend"""
+    """Generar token seguro específico para frontend con control de colecciones"""
     if not user_data.get('is_admin'):
         return jsonify({"error": "Se requieren privilegios de administrador"}), 403
     
@@ -1657,6 +1788,12 @@ def generate_frontend_token(user_data):
         plan_type = data.get('plan_type', 'free')
         allowed_domains = data.get('allowed_domains', [])
         
+        # ✅ NUEVO: Control de colecciones permitidas
+        allowed_collections = data.get('allowed_collections', ['peliculas'])  # Por defecto solo películas
+        can_create_content = data.get('can_create_content', False)
+        can_edit_content = data.get('can_edit_content', False)
+        can_delete_content = data.get('can_delete_content', False)
+        
         # Validar que el plan sea válido
         if plan_type not in PLAN_CONFIG:
             return jsonify({"error": "Plan no válido"}), 400
@@ -1665,12 +1802,24 @@ def generate_frontend_token(user_data):
         if allowed_domains and not isinstance(allowed_domains, list):
             return jsonify({"error": "allowed_domains debe ser una lista de URLs"}), 400
         
+        # ✅ NUEVO: Validar colecciones permitidas
+        valid_collections = ['peliculas', 'contenido', 'canales']
+        if not isinstance(allowed_collections, list):
+            return jsonify({"error": "allowed_collections debe ser una lista"}), 400
+        
+        for collection in allowed_collections:
+            if collection not in valid_collections:
+                return jsonify({
+                    "error": f"Colección no válida: {collection}",
+                    "colecciones_válidas": valid_collections
+                }), 400
+        
         # Generar token único
         token = generate_unique_token()
         
-        # Crear usuario para frontend
+        # Crear usuario para frontend con control de colecciones
         user_data_firestore = {
-            'username': f'frontend_user_{secrets.token_hex(8)}',
+            'username': f'frontend_{secrets.token_hex(8)}',
             'email': f'frontend_{secrets.token_hex(8)}@yourapp.com',
             'token': token,
             'active': True,
@@ -1690,7 +1839,18 @@ def generate_frontend_token(user_data):
             'max_daily_streams': PLAN_CONFIG[plan_type]['daily_streams_limit'],
             'features': PLAN_CONFIG[plan_type]['features'],
             'allowed_domains': allowed_domains,
-            'is_frontend_token': True
+            'is_frontend_token': True,
+            # ✅ NUEVO: Campos de control de colecciones
+            'allowed_collections': allowed_collections,
+            'can_create_content': can_create_content,
+            'can_edit_content': can_edit_content,
+            'can_delete_content': can_delete_content,
+            'frontend_permissions': {
+                'collections_access': allowed_collections,
+                'content_creation': can_create_content,
+                'content_editing': can_edit_content,
+                'content_deletion': can_delete_content
+            }
         }
         
         # Guardar en Firebase
@@ -1702,13 +1862,21 @@ def generate_frontend_token(user_data):
             "token": token,
             "plan_type": plan_type,
             "allowed_domains": allowed_domains,
+            # ✅ NUEVO: Retornar configuración de colecciones
+            "allowed_collections": allowed_collections,
+            "content_permissions": {
+                "create": can_create_content,
+                "edit": can_edit_content,
+                "delete": can_delete_content
+            },
             "limits": {
                 "daily": PLAN_CONFIG[plan_type]['daily_limit'],
                 "session": PLAN_CONFIG[plan_type]['session_limit'],
                 "daily_streams": PLAN_CONFIG[plan_type]['daily_streams_limit']
             },
             "message": "Token generado para uso en frontend",
-            "usage_instructions": "Usar en frontend con: Authorization: Bearer {token}"
+            "usage_instructions": "Usar en frontend con: Authorization: Bearer {token}",
+            "security_note": "Este token solo funcionará desde los dominios especificados y tendrá acceso únicamente a las colecciones permitidas"
         })
         
     except Exception as e:
@@ -1727,6 +1895,17 @@ def create_pelicula(user_data):
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
+    
+    # ✅ NUEVO: Verificar permisos para tokens web
+    permission_check = check_content_permissions(user_data, 'create')
+    if permission_check:
+        return jsonify(permission_check[0]), permission_check[1]
+    
+    # ✅ NUEVO: Verificar acceso a la colección para tokens web
+    collection_check = check_collection_access(user_data, 'peliculas')
+    if collection_check:
+        return jsonify(collection_check[0]), collection_check[1]
+    
     try:
         data = request.get_json()
         if not data:
@@ -1784,6 +1963,17 @@ def update_pelicula(user_data, pelicula_id):
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
+    
+    # ✅ NUEVO: Verificar permisos para tokens web
+    permission_check = check_content_permissions(user_data, 'edit')
+    if permission_check:
+        return jsonify(permission_check[0]), permission_check[1]
+    
+    # ✅ NUEVO: Verificar acceso a la colección para tokens web
+    collection_check = check_collection_access(user_data, 'peliculas')
+    if collection_check:
+        return jsonify(collection_check[0]), collection_check[1]
+    
     try:
         data = request.get_json()
         if not data:
@@ -1829,11 +2019,20 @@ def update_pelicula(user_data, pelicula_id):
 def delete_pelicula(user_data, pelicula_id):
     """Eliminar película (Solo Admin)"""
     if not user_data.get('is_admin'):
-        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+        # ✅ NUEVO: Verificar permisos para tokens web
+        permission_check = check_content_permissions(user_data, 'delete')
+        if permission_check:
+            return jsonify(permission_check[0]), permission_check[1]
     
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
+    
+    # ✅ NUEVO: Verificar acceso a la colección para tokens web
+    collection_check = check_collection_access(user_data, 'peliculas')
+    if collection_check:
+        return jsonify(collection_check[0]), collection_check[1]
+    
     try:
         doc_ref = db.collection('peliculas').document(pelicula_id)
         doc = doc_ref.get()
@@ -1861,6 +2060,17 @@ def create_serie(user_data):
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
+    
+    # ✅ NUEVO: Verificar permisos para tokens web
+    permission_check = check_content_permissions(user_data, 'create')
+    if permission_check:
+        return jsonify(permission_check[0]), permission_check[1]
+    
+    # ✅ NUEVO: Verificar acceso a la colección para tokens web
+    collection_check = check_collection_access(user_data, 'contenido')
+    if collection_check:
+        return jsonify(collection_check[0]), collection_check[1]
+    
     try:
         data = request.get_json()
         if not data:
@@ -1916,6 +2126,17 @@ def update_serie(user_data, serie_id):
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
+    
+    # ✅ NUEVO: Verificar permisos para tokens web
+    permission_check = check_content_permissions(user_data, 'edit')
+    if permission_check:
+        return jsonify(permission_check[0]), permission_check[1]
+    
+    # ✅ NUEVO: Verificar acceso a la colección para tokens web
+    collection_check = check_collection_access(user_data, 'contenido')
+    if collection_check:
+        return jsonify(collection_check[0]), collection_check[1]
+    
     try:
         data = request.get_json()
         if not data:
@@ -1962,11 +2183,20 @@ def update_serie(user_data, serie_id):
 def delete_serie(user_data, serie_id):
     """Eliminar serie (Solo Admin)"""
     if not user_data.get('is_admin'):
-        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+        # ✅ NUEVO: Verificar permisos para tokens web
+        permission_check = check_content_permissions(user_data, 'delete')
+        if permission_check:
+            return jsonify(permission_check[0]), permission_check[1]
     
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
+    
+    # ✅ NUEVO: Verificar acceso a la colección para tokens web
+    collection_check = check_collection_access(user_data, 'contenido')
+    if collection_check:
+        return jsonify(collection_check[0]), collection_check[1]
+    
     try:
         doc_ref = db.collection('contenido').document(serie_id)
         doc = doc_ref.get()
@@ -1994,6 +2224,17 @@ def create_canal(user_data):
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
+    
+    # ✅ NUEVO: Verificar permisos para tokens web
+    permission_check = check_content_permissions(user_data, 'create')
+    if permission_check:
+        return jsonify(permission_check[0]), permission_check[1]
+    
+    # ✅ NUEVO: Verificar acceso a la colección para tokens web
+    collection_check = check_collection_access(user_data, 'canales')
+    if collection_check:
+        return jsonify(collection_check[0]), collection_check[1]
+    
     try:
         data = request.get_json()
         if not data:
@@ -2048,6 +2289,17 @@ def update_canal(user_data, canal_id):
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
+    
+    # ✅ NUEVO: Verificar permisos para tokens web
+    permission_check = check_content_permissions(user_data, 'edit')
+    if permission_check:
+        return jsonify(permission_check[0]), permission_check[1]
+    
+    # ✅ NUEVO: Verificar acceso a la colección para tokens web
+    collection_check = check_collection_access(user_data, 'canales')
+    if collection_check:
+        return jsonify(collection_check[0]), collection_check[1]
+    
     try:
         data = request.get_json()
         if not data:
@@ -2093,11 +2345,20 @@ def update_canal(user_data, canal_id):
 def delete_canal(user_data, canal_id):
     """Eliminar canal (Solo Admin)"""
     if not user_data.get('is_admin'):
-        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+        # ✅ NUEVO: Verificar permisos para tokens web
+        permission_check = check_content_permissions(user_data, 'delete')
+        if permission_check:
+            return jsonify(permission_check[0]), permission_check[1]
     
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
+    
+    # ✅ NUEVO: Verificar acceso a la colección para tokens web
+    collection_check = check_collection_access(user_data, 'canales')
+    if collection_check:
+        return jsonify(collection_check[0]), collection_check[1]
+    
     try:
         doc_ref = db.collection('canales').document(canal_id)
         doc = doc_ref.get()
@@ -2117,7 +2378,7 @@ def delete_canal(user_data, canal_id):
         return jsonify({"error": str(e)}), 500
 
 # =============================================
-# ENDPOINTS EXISTENTES PARA USUARIOS NORMALES
+# ENDPOINTS EXISTENTES PARA USUARIOS NORMALES (ACTUALIZADOS CON CONTROL DE COLECCIONES)
 # =============================================
 
 @app.route('/api/user/info', methods=['GET'])
@@ -2183,8 +2444,15 @@ def get_user_info(user_data):
         "active": user_data.get('active', True),
         "is_admin": user_data.get('is_admin', False),
         "plan_type": 'premium' if user_data.get('is_admin') else plan_type,
-        "allowed_domains": user_data.get('allowed_domains', []),  # NUEVO: Incluir dominios permitidos
-        "is_frontend_token": user_data.get('is_frontend_token', False),  # NUEVO: Identificar tokens de frontend
+        "allowed_domains": user_data.get('allowed_domains', []),
+        "is_frontend_token": user_data.get('is_frontend_token', False),
+        # ✅ NUEVO: Información de colecciones y permisos para tokens web
+        "allowed_collections": user_data.get('allowed_collections', []),
+        "content_permissions": {
+            "create": user_data.get('can_create_content', False),
+            "edit": user_data.get('can_edit_content', False),
+            "delete": user_data.get('can_delete_content', False)
+        } if user_data.get('is_frontend_token') else None,
         "created_at": user_data.get('created_at'),
         "usage_stats": usage_stats,
         "features": plan_features
@@ -2292,7 +2560,7 @@ def home(user_data):
     
     # Agregar información de endpoints de creación/edición
     creation_endpoints = {}
-    if user_data.get('is_admin') or user_data.get('plan_type') == 'premium':
+    if user_data.get('is_admin') or user_data.get('plan_type') == 'premium' or user_data.get('can_create_content'):
         creation_endpoints = {
             "create_movie": "POST /api/peliculas",
             "update_movie": "PUT /api/peliculas/<id>",
@@ -2301,20 +2569,33 @@ def home(user_data):
             "create_channel": "POST /api/canales",
             "update_channel": "PUT /api/canales/<id>"
         }
-        if user_data.get('is_admin'):
+        if user_data.get('is_admin') or user_data.get('can_delete_content'):
             creation_endpoints.update({
                 "delete_movie": "DELETE /api/peliculas/<id>",
                 "delete_series": "DELETE /api/series/<id>",
                 "delete_channel": "DELETE /api/canales/<id>"
             })
     
+    # ✅ NUEVO: Información de colecciones permitidas para tokens web
+    collection_info = None
+    if user_data.get('is_frontend_token'):
+        collection_info = {
+            "allowed_collections": user_data.get('allowed_collections', []),
+            "content_permissions": {
+                "create": user_data.get('can_create_content', False),
+                "edit": user_data.get('can_edit_content', False),
+                "delete": user_data.get('can_delete_content', False)
+            }
+        }
+    
     return jsonify({
         "message": f"🎬 API de Streaming - {welcome_msg}",
         "version": "2.0.0",
         "user": user_data.get('username'),
         "plan_type": 'premium' if user_data.get('is_admin') else user_data.get('plan_type', 'free'),
-        "allowed_domains": user_data.get('allowed_domains', []),  # NUEVO: Mostrar dominios permitidos
-        "is_frontend_token": user_data.get('is_frontend_token', False),  # NUEVO: Identificar tokens de frontend
+        "allowed_domains": user_data.get('allowed_domains', []),
+        "is_frontend_token": user_data.get('is_frontend_token', False),
+        "collection_access": collection_info,  # ✅ NUEVO
         "firebase_status": "✅ Conectado" if db else "❌ Desconectado",
         "usage_limits": limits_info,
         "endpoints_available": {
@@ -2341,18 +2622,24 @@ def home(user_data):
             "regenerate_token": "POST /api/admin/regenerate-token",
             "usage_statistics": "GET /api/admin/usage-statistics",
             "reconnect_firebase": "POST /api/connection/reconnect",
-            "generate_frontend_token": "POST /api/generate-frontend-token"  # NUEVO
+            "generate_frontend_token": "POST /api/generate-frontend-token"
         } if user_data.get('is_admin') else None,
         "instructions": "Incluya el token en el header: Authorization: Bearer {token}"
     })
 
-# Endpoints de contenido (todos requieren token) - EXISTENTES
+# Endpoints de contenido (todos requieren token) - ACTUALIZADOS CON CONTROL DE COLECCIONES
 @app.route('/api/peliculas', methods=['GET'])
 @token_required
 def get_peliculas(user_data):
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
+    
+    # ✅ NUEVO: Verificar acceso a la colección para tokens web
+    collection_check = check_collection_access(user_data, 'peliculas')
+    if collection_check:
+        return jsonify(collection_check[0]), collection_check[1]
+    
     try:
         limit = int(request.args.get('limit', 20))
         page = int(request.args.get('page', 1))
@@ -2402,6 +2689,12 @@ def get_pelicula(user_data, pelicula_id):
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
+    
+    # ✅ NUEVO: Verificar acceso a la colección para tokens web
+    collection_check = check_collection_access(user_data, 'peliculas')
+    if collection_check:
+        return jsonify(collection_check[0]), collection_check[1]
+    
     try:
         doc_ref = db.collection('peliculas').document(pelicula_id)
         doc = doc_ref.get()
@@ -2427,6 +2720,11 @@ def get_series(user_data):
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
+    
+    # ✅ NUEVO: Verificar acceso a la colección para tokens web
+    collection_check = check_collection_access(user_data, 'contenido')
+    if collection_check:
+        return jsonify(collection_check[0]), collection_check[1]
     
     try:
         limit = int(request.args.get('limit', 20))
@@ -2459,6 +2757,11 @@ def get_serie(user_data, serie_id):
     if firebase_check:
         return firebase_check
     
+    # ✅ NUEVO: Verificar acceso a la colección para tokens web
+    collection_check = check_collection_access(user_data, 'contenido')
+    if collection_check:
+        return jsonify(collection_check[0]), collection_check[1]
+    
     try:
         doc_ref = db.collection('contenido').document(serie_id)
         doc = doc_ref.get()
@@ -2486,6 +2789,12 @@ def get_canales(user_data):
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
+    
+    # ✅ NUEVO: Verificar acceso a la colección para tokens web
+    collection_check = check_collection_access(user_data, 'canales')
+    if collection_check:
+        return jsonify(collection_check[0]), collection_check[1]
+    
     try:
         canales_ref = db.collection('canales')
         docs = canales_ref.stream()
@@ -2511,6 +2820,12 @@ def get_canal(user_data, canal_id):
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
+    
+    # ✅ NUEVO: Verificar acceso a la colección para tokens web
+    collection_check = check_collection_access(user_data, 'canales')
+    if collection_check:
+        return jsonify(collection_check[0]), collection_check[1]
+    
     try:
         doc_ref = db.collection('canales').document(canal_id)
         doc = doc_ref.get()
@@ -2548,28 +2863,45 @@ def buscar(user_data):
         limit = min(int(request.args.get('limit', 10)), search_limit)
         resultados = []
         
-        peliculas_ref = db.collection('peliculas')
-        peliculas_query = peliculas_ref.where('title', '>=', termino).where('title', '<=', termino + '\uf8ff')
-        peliculas_docs = peliculas_query.limit(limit).stream()
+        # ✅ NUEVO: Solo buscar en colecciones permitidas para tokens web
+        allowed_collections = user_data.get('allowed_collections', ['peliculas', 'contenido', 'canales'])
         
-        for doc in peliculas_docs:
-            data = normalize_movie_data(doc.to_dict(), doc.id)
-            data['tipo'] = 'pelicula'
-            if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
-                data = limit_content_info(data, 'pelicula')
-            resultados.append(data)
-        
-        # Todos los usuarios pueden buscar series ahora
-        series_ref = db.collection('contenido')
-        series_query = series_ref.where('title', '>=', termino).where('title', '<=', termino + '\uf8ff')
-        series_docs = series_query.limit(limit).stream()
-        for doc in series_docs:
-            data = doc.to_dict()
-            if data.get('seasons'):
-                data = normalize_series_data(data, doc.id)
-                data['tipo'] = 'serie'
+        if 'peliculas' in allowed_collections:
+            peliculas_ref = db.collection('peliculas')
+            peliculas_query = peliculas_ref.where('title', '>=', termino).where('title', '<=', termino + '\uf8ff')
+            peliculas_docs = peliculas_query.limit(limit).stream()
+            
+            for doc in peliculas_docs:
+                data = normalize_movie_data(doc.to_dict(), doc.id)
+                data['tipo'] = 'pelicula'
                 if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
-                    data = limit_content_info(data, 'serie')
+                    data = limit_content_info(data, 'pelicula')
+                resultados.append(data)
+        
+        # Todos los usuarios pueden buscar series ahora, si tienen acceso
+        if 'contenido' in allowed_collections:
+            series_ref = db.collection('contenido')
+            series_query = series_ref.where('title', '>=', termino).where('title', '<=', termino + '\uf8ff')
+            series_docs = series_query.limit(limit).stream()
+            for doc in series_docs:
+                data = doc.to_dict()
+                if data.get('seasons'):
+                    data = normalize_series_data(data, doc.id)
+                    data['tipo'] = 'serie'
+                    if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
+                        data = limit_content_info(data, 'serie')
+                    resultados.append(data)
+        
+        # ✅ NUEVO: Buscar en canales si está permitido
+        if 'canales' in allowed_collections:
+            canales_ref = db.collection('canales')
+            canales_query = canales_ref.where('name', '>=', termino).where('name', '<=', termino + '\uf8ff')
+            canales_docs = canales_query.limit(limit).stream()
+            for doc in canales_docs:
+                data = normalize_channel_data(doc.to_dict(), doc.id)
+                data['tipo'] = 'canal'
+                if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
+                    data = limit_content_info(data, 'canal')
                 resultados.append(data)
         
         return jsonify({
@@ -2578,6 +2910,7 @@ def buscar(user_data):
             "count": len(resultados),
             "search_limit": search_limit,
             "plan_type": 'premium' if user_data.get('is_admin') else user_data.get('plan_type', 'free'),
+            "allowed_collections": allowed_collections if user_data.get('is_frontend_token') else "all",  # ✅ NUEVO
             "data": resultados
         })
     except Exception as e:
@@ -2603,7 +2936,13 @@ def get_stream_url(user_data, content_id):
         content_doc = content_ref.get()
         streaming_url = None
         content_type = "pelicula"
+        
+        # ✅ NUEVO: Verificar acceso a la colección para tokens web
         if content_doc.exists:
+            collection_check = check_collection_access(user_data, 'peliculas')
+            if collection_check:
+                return jsonify(collection_check[0]), collection_check[1]
+            
             content_data = normalize_movie_data(content_doc.to_dict(), content_id)
             play_links = content_data.get('play_links', [])
             if play_links:
@@ -2612,6 +2951,11 @@ def get_stream_url(user_data, content_id):
             content_ref = db.collection('contenido').document(content_id)
             content_doc = content_ref.get()
             if content_doc.exists:
+                # ✅ NUEVO: Verificar acceso a la colección para tokens web
+                collection_check = check_collection_access(user_data, 'contenido')
+                if collection_check:
+                    return jsonify(collection_check[0]), collection_check[1]
+                
                 content_data = content_doc.to_dict()
                 content_type = "serie"
                 # Para series, se necesita especificar temporada y episodio
@@ -2650,6 +2994,11 @@ def get_stream_url(user_data, content_id):
                 content_ref = db.collection('canales').document(content_id)
                 content_doc = content_ref.get()
                 if content_doc.exists:
+                    # ✅ NUEVO: Verificar acceso a la colección para tokens web
+                    collection_check = check_collection_access(user_data, 'canales')
+                    if collection_check:
+                        return jsonify(collection_check[0]), collection_check[1]
+                    
                     content_data = normalize_channel_data(content_doc.to_dict(), content_id)
                     content_type = "canal"
                     stream_options = content_data.get('stream_options', [])
@@ -2677,23 +3026,35 @@ def get_estadisticas(user_data):
     if firebase_check:
         return firebase_check
     try:
-        peliculas_count = len(list(db.collection('peliculas').limit(1000).stream()))
+        # ✅ NUEVO: Solo contar colecciones permitidas para tokens web
+        allowed_collections = user_data.get('allowed_collections', ['peliculas', 'contenido', 'canales'])
+        
+        peliculas_count = 0
         series_count = 0
-        # Todos los usuarios pueden ver estadísticas de series ahora
-        series_ref = db.collection('contenido')
-        series_docs = series_ref.limit(1000).stream()
-        for doc in series_docs:
-            data = doc.to_dict()
-            if data.get('seasons'):
-                series_count += 1
-        canales_count = len(list(db.collection('canales').limit(1000).stream()))
+        canales_count = 0
+        
+        if 'peliculas' in allowed_collections:
+            peliculas_count = len(list(db.collection('peliculas').limit(1000).stream()))
+        
+        if 'contenido' in allowed_collections:
+            series_ref = db.collection('contenido')
+            series_docs = series_ref.limit(1000).stream()
+            for doc in series_docs:
+                data = doc.to_dict()
+                if data.get('seasons'):
+                    series_count += 1
+        
+        if 'canales' in allowed_collections:
+            canales_count = len(list(db.collection('canales').limit(1000).stream()))
+        
         return jsonify({
             "success": True,
             "data": {
                 "total_peliculas": peliculas_count,
                 "total_series": series_count,
                 "total_canales": canales_count,
-                "total_contenido": peliculas_count + series_count
+                "total_contenido": peliculas_count + series_count,
+                "allowed_collections": allowed_collections if user_data.get('is_frontend_token') else "all"  # ✅ NUEVO
             }
         })
     except Exception as e:
@@ -2718,3 +3079,4 @@ def too_large(error):
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=5000)
+[file content end]
