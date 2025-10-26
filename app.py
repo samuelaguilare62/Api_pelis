@@ -2686,7 +2686,7 @@ def get_estadisticas(user_data):
             data = doc.to_dict()
             if data.get('seasons'):
                 series_count += 1
-        canales_count = len(list(db.collection('canales').limit(1000).stream())
+        canales_count = len(list(db.collection('canales').limit(1000).stream()))
         return jsonify({
             "success": True,
             "data": {
