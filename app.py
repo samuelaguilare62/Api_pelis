@@ -2677,7 +2677,7 @@ def get_estadisticas(user_data):
     if firebase_check:
         return firebase_check
     try:
-        peliculas_count = len(list(db.collection('peliculas').limit(1000).stream())
+        peliculas_count = len(list(db.collection('peliculas').limit(1000).stream()))
         series_count = 0
         # Todos los usuarios pueden ver estadísticas de series ahora
         series_ref = db.collection('contenido')
