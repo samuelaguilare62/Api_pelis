@@ -1,5 +1,3 @@
-[file name]: app.py
-[file content begin]
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import firebase_admin
@@ -3079,4 +3077,3 @@ def too_large(error):
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=5000)
-[file content end]
