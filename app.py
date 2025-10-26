@@ -11,6 +11,7 @@ from collections import defaultdict
 import re
 import requests
 from datetime import datetime, timedelta
+import urllib.parse
 
 # Inicializar Flask
 app = Flask(__name__)
@@ -128,6 +129,8 @@ db = initialize_firebase()
 
 # Colección para almacenar usuarios y tokens
 TOKENS_COLLECTION = "api_users"
+# NUEVA: Colección para aplicaciones registradas (solo admin)
+APPLICATIONS_COLLECTION = "registered_applications"
 
 # Configuración de planes - ACTUALIZADA CON LÍMITES DE STREAMS
 PLAN_CONFIG = {
@@ -190,6 +193,143 @@ ip_lock = threading.Lock()
 # Configuración de seguridad
 MAX_REQUESTS_PER_MINUTE_PER_IP = 100
 MAX_REQUESTS_PER_MINUTE_PER_USER = 60
+
+# =============================================
+# NUEVO: SISTEMA DE REGISTRO DE APLICACIONES (SOLO ADMIN)
+# =============================================
+
+def generate_client_id():
+    """Generar un ID único para la aplicación"""
+    return f"app_{secrets.token_urlsafe(16)}"
+
+def generate_api_key():
+    """Generar una API Key única"""
+    return f"key_{secrets.token_urlsafe(32)}"
+
+def normalize_domain(domain):
+    """Normalizar dominio para consistencia"""
+    if not domain:
+        return None
+    
+    # Remover protocolo y path
+    domain = domain.lower().replace('https://', '').replace('http://', '')
+    domain = domain.split('/')[0]
+    
+    # Remover puerto si existe
+    domain = domain.split(':')[0]
+    
+    # Remover www si existe
+    if domain.startswith('www.'):
+        domain = domain[4:]
+    
+    return domain.strip()
+
+def extract_domain_from_request():
+    """Extraer dominio de la cabecera Origin o Referer"""
+    origin = request.headers.get('Origin')
+    if origin:
+        return normalize_domain(origin)
+    
+    referer = request.headers.get('Referer')
+    if referer:
+        return normalize_domain(referer)
+    
+    # Para testing o aplicaciones nativas
+    return None
+
+def validate_domain_for_application(client_id, api_key=None):
+    """Validar que el dominio de la solicitud esté autorizado para la aplicación"""
+    try:
+        # Admin tokens no requieren validación de dominio
+        if api_key and api_key in ADMIN_TOKENS:
+            return True, "admin"
+        
+        apps_ref = db.collection(APPLICATIONS_COLLECTION)
+        
+        # Buscar por client_id
+        if client_id:
+            app_doc = apps_ref.document(client_id).get()
+            if app_doc.exists:
+                app_data = app_doc.to_dict()
+                if api_key and app_data.get('api_key') == api_key and app_data.get('is_active', True):
+                    request_domain = extract_domain_from_request()
+                    authorized_domains = app_data.get('authorized_domains', [])
+                    
+                    # Si no hay dominio en la request (aplicaciones nativas, testing)
+                    if not request_domain:
+                        return True, "no_domain"
+                    
+                    # Verificar si el dominio está autorizado
+                    if any(normalize_domain(domain) == request_domain for domain in authorized_domains):
+                        return True, "domain_valid"
+                    else:
+                        return False, f"Dominio no autorizado: {request_domain}"
+        
+        # Buscar por api_key si no se encontró por client_id
+        if api_key:
+            query = apps_ref.where('api_key', '==', api_key).where('is_active', '==', True).limit(1).stream()
+            for doc in query:
+                app_data = doc.to_dict()
+                request_domain = extract_domain_from_request()
+                authorized_domains = app_data.get('authorized_domains', [])
+                
+                if not request_domain:
+                    return True, "no_domain"
+                
+                if any(normalize_domain(domain) == request_domain for domain in authorized_domains):
+                    return True, "domain_valid"
+                else:
+                    return False, f"Dominio no autorizado: {request_domain}"
+        
+        return False, "Aplicación no encontrada o API Key inválida"
+        
+    except Exception as e:
+        print(f"Error validando dominio: {e}")
+        return False, f"Error interno: {str(e)}"
+
+def domain_validation_required(f):
+    """Decorador para validar dominio en cada petición"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # Endpoints públicos que no requieren validación de dominio
+        public_endpoints = ['health_check', 'diagnostic', 'connection_status', 'plan_comparison']
+        if request.endpoint in public_endpoints:
+            return f(*args, **kwargs)
+        
+        # Para endpoints de admin, usar el token de admin existente
+        if 'admin' in request.endpoint:
+            # La validación de admin se hace en token_required
+            return f(*args, **kwargs)
+        
+        client_id = request.headers.get('X-Client-ID')
+        api_key = request.headers.get('X-API-Key')
+        
+        # Si no hay client_id ni api_key, intentar con el sistema de tokens existente
+        if not client_id and not api_key:
+            # Dejar que token_required maneje la autenticación
+            return f(*args, **kwargs)
+        
+        # Validar aplicación y dominio
+        is_valid, message = validate_domain_for_application(client_id, api_key)
+        
+        if not is_valid:
+            return jsonify({
+                "success": False,
+                "error": "Acceso denegado",
+                "details": message,
+                "client_id_provided": client_id is not None,
+                "api_key_provided": api_key is not None
+            }), 403
+        
+        # Agregar información de la aplicación al contexto de la request
+        request.application_context = {
+            "client_id": client_id,
+            "api_key": api_key,
+            "validation_type": message
+        }
+        
+        return f(*args, **kwargs)
+    return decorated
 
 # FUNCIÓN MEJORADA PARA ENVÍO DE EMAILS SIN SMTP
 def send_email_async(to_email, subject, message):
@@ -1189,7 +1329,8 @@ def diagnostic():
             "token_authentication": "✅ Activado",
             "plan_restrictions": "✅ Activado",
             "email_notifications": "✅ Activado",
-            "stream_limits": "✅ Activado"  # NUEVO: Sistema de límites de streams
+            "stream_limits": "✅ Activado",  # NUEVO: Sistema de límites de streams
+            "domain_validation": "✅ Activado"  # NUEVO: Validación de dominios
         },
         "endpoints_working": {
             "diagnostic": "✅ /api/diagnostic",
@@ -1203,7 +1344,302 @@ def diagnostic():
     })
 
 # =============================================
-# ENDPOINTS DE ADMINISTRACIÓN (SOLO ADMINS)
+# NUEVO: ENDPOINTS DE APLICACIONES (SOLO ADMIN)
+# =============================================
+
+@app.route('/api/admin/applications/register', methods=['POST'])
+@token_required
+def admin_register_application(user_data):
+    """Registrar una nueva aplicación (solo admin)"""
+    if not user_data.get('is_admin'):
+        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+    
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+        
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Datos JSON requeridos"}), 400
+        
+        app_name = data.get('app_name')
+        domains = data.get('authorized_domains', [])
+        description = data.get('description', '')
+        
+        if not app_name:
+            return jsonify({"error": "El nombre de la aplicación es requerido"}), 400
+        
+        if not domains or not isinstance(domains, list):
+            return jsonify({"error": "Debe proporcionar al menos un dominio autorizado"}), 400
+        
+        # Normalizar dominios
+        normalized_domains = [normalize_domain(domain) for domain in domains if normalize_domain(domain)]
+        
+        if not normalized_domains:
+            return jsonify({"error": "Debe proporcionar al menos un dominio válido"}), 400
+        
+        # Generar IDs únicos
+        client_id = generate_client_id()
+        api_key = generate_api_key()
+        
+        # Crear registro de aplicación
+        app_data = {
+            'client_id': client_id,
+            'api_key': api_key,
+            'app_name': app_name,
+            'description': description,
+            'authorized_domains': normalized_domains,
+            'created_by_admin': user_data.get('username', 'admin'),
+            'created_at': firestore.SERVER_TIMESTAMP,
+            'is_active': True,
+            'last_used': None,
+            'usage_count': 0,
+            'total_requests': 0
+        }
+        
+        # Guardar en Firestore
+        apps_ref = db.collection(APPLICATIONS_COLLECTION)
+        apps_ref.document(client_id).set(app_data)
+        
+        print(f"✅ Nueva aplicación registrada por admin: {app_name}")
+        
+        return jsonify({
+            "success": True,
+            "message": "Aplicación registrada exitosamente",
+            "application": {
+                "client_id": client_id,
+                "api_key": api_key,  # IMPORTANTE: Solo se muestra una vez
+                "app_name": app_name,
+                "description": description,
+                "authorized_domains": normalized_domains,
+                "created_at": datetime.now().isoformat(),
+                "created_by": user_data.get('username', 'admin')
+            },
+            "warning": "Guarde la API Key de forma segura, no se podrá recuperar posteriormente"
+        }), 201
+        
+    except Exception as e:
+        print(f"Error registrando aplicación: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/applications', methods=['GET'])
+@token_required
+def admin_get_applications(user_data):
+    """Obtener todas las aplicaciones registradas (solo admin)"""
+    if not user_data.get('is_admin'):
+        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+    
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+        
+    try:
+        apps_ref = db.collection(APPLICATIONS_COLLECTION)
+        docs = apps_ref.stream()
+        
+        applications = []
+        for doc in docs:
+            app_data = doc.to_dict()
+            # No incluir la API Key por seguridad en la lista
+            if 'api_key' in app_data:
+                del app_data['api_key']
+            app_data['id'] = doc.id
+            applications.append(app_data)
+        
+        return jsonify({
+            "success": True,
+            "applications": applications,
+            "count": len(applications)
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/applications/<client_id>', methods=['GET'])
+@token_required
+def admin_get_application(user_data, client_id):
+    """Obtener detalles de una aplicación específica (solo admin)"""
+    if not user_data.get('is_admin'):
+        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+    
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+        
+    try:
+        app_ref = db.collection(APPLICATIONS_COLLECTION).document(client_id)
+        app_doc = app_ref.get()
+        
+        if not app_doc.exists:
+            return jsonify({"error": "Aplicación no encontrada"}), 404
+        
+        app_data = app_doc.to_dict()
+        # Incluir API Key solo para admin en vista detallada
+        return jsonify({
+            "success": True,
+            "application": app_data
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/applications/<client_id>', methods=['PUT'])
+@token_required
+def admin_update_application(user_data, client_id):
+    """Actualizar una aplicación (solo admin)"""
+    if not user_data.get('is_admin'):
+        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+    
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+        
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Datos JSON requeridos"}), 400
+        
+        app_ref = db.collection(APPLICATIONS_COLLECTION).document(client_id)
+        app_doc = app_ref.get()
+        
+        if not app_doc.exists:
+            return jsonify({"error": "Aplicación no encontrada"}), 404
+        
+        update_data = {}
+        
+        if 'app_name' in data:
+            update_data['app_name'] = data['app_name']
+        
+        if 'description' in data:
+            update_data['description'] = data['description']
+        
+        if 'authorized_domains' in data:
+            domains = data['authorized_domains']
+            if not isinstance(domains, list) or not domains:
+                return jsonify({"error": "Debe proporcionar al menos un dominio autorizado"}), 400
+            
+            normalized_domains = [normalize_domain(domain) for domain in domains if normalize_domain(domain)]
+            if not normalized_domains:
+                return jsonify({"error": "Debe proporcionar al menos un dominio válido"}), 400
+            
+            update_data['authorized_domains'] = normalized_domains
+        
+        if 'is_active' in data:
+            update_data['is_active'] = bool(data['is_active'])
+        
+        update_data['updated_at'] = firestore.SERVER_TIMESTAMP
+        update_data['updated_by'] = user_data.get('username', 'admin')
+        
+        app_ref.update(update_data)
+        
+        return jsonify({
+            "success": True,
+            "message": "Aplicación actualizada exitosamente",
+            "updated_fields": list(update_data.keys())
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/applications/<client_id>', methods=['DELETE'])
+@token_required
+def admin_delete_application(user_data, client_id):
+    """Eliminar una aplicación (solo admin)"""
+    if not user_data.get('is_admin'):
+        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+    
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+        
+    try:
+        app_ref = db.collection(APPLICATIONS_COLLECTION).document(client_id)
+        app_doc = app_ref.get()
+        
+        if not app_doc.exists:
+            return jsonify({"error": "Aplicación no encontrada"}), 404
+        
+        app_ref.delete()
+        
+        return jsonify({
+            "success": True,
+            "message": "Aplicación eliminada exitosamente"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/applications/<client_id>/regenerate-key', methods=['POST'])
+@token_required
+def admin_regenerate_api_key(user_data, client_id):
+    """Regenerar API Key para una aplicación (solo admin)"""
+    if not user_data.get('is_admin'):
+        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+    
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+        
+    try:
+        app_ref = db.collection(APPLICATIONS_COLLECTION).document(client_id)
+        app_doc = app_ref.get()
+        
+        if not app_doc.exists:
+            return jsonify({"error": "Aplicación no encontrada"}), 404
+        
+        new_api_key = generate_api_key()
+        
+        app_ref.update({
+            'api_key': new_api_key,
+            'key_regenerated_at': firestore.SERVER_TIMESTAMP,
+            'regenerated_by': user_data.get('username', 'admin')
+        })
+        
+        return jsonify({
+            "success": True,
+            "message": "API Key regenerada exitosamente",
+            "new_api_key": new_api_key,
+            "warning": "La API Key anterior ya no es válida"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/applications/<client_id>/stats', methods=['GET'])
+@token_required
+def admin_get_application_stats(user_data, client_id):
+    """Obtener estadísticas de uso de una aplicación (solo admin)"""
+    if not user_data.get('is_admin'):
+        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+    
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+        
+    try:
+        app_ref = db.collection(APPLICATIONS_COLLECTION).document(client_id)
+        app_doc = app_ref.get()
+        
+        if not app_doc.exists:
+            return jsonify({"error": "Aplicación no encontrada"}), 404
+        
+        app_data = app_doc.to_dict()
+        
+        stats = {
+            "total_requests": app_data.get('total_requests', 0),
+            "usage_count": app_data.get('usage_count', 0),
+            "last_used": app_data.get('last_used'),
+            "created_at": app_data.get('created_at'),
+            "is_active": app_data.get('is_active', True)
+        }
+        
+        return jsonify({
+            "success": True,
+            "application_id": client_id,
+            "app_name": app_data.get('app_name'),
+            "stats": stats
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# =============================================
+# ENDPOINTS DE ADMINISTRACIÓN EXISTENTES (ACTUALIZADOS)
 # =============================================
 
 @app.route('/api/admin/create-user', methods=['POST'])
@@ -1972,10 +2408,11 @@ def delete_canal(user_data, canal_id):
         return jsonify({"error": str(e)}), 500
 
 # =============================================
-# ENDPOINTS EXISTENTES PARA USUARIOS NORMALES
+# ENDPOINTS EXISTENTES PARA USUARIOS NORMALES (ACTUALIZADOS CON VALIDACIÓN DE DOMINIO)
 # =============================================
 
 @app.route('/api/user/info', methods=['GET'])
+@domain_validation_required
 @token_required
 def get_user_info(user_data):
     firebase_check = check_firebase()
@@ -2042,10 +2479,17 @@ def get_user_info(user_data):
         "usage_stats": usage_stats,
         "features": plan_features
     }
-    return jsonify({
+    
+    response_data = {
         "success": True,
         "user": user_response
-    })
+    }
+    
+    # Agregar información de la aplicación si se usó autenticación por aplicación
+    if hasattr(request, 'application_context'):
+        response_data["application_context"] = request.application_context
+    
+    return jsonify(response_data)
 
 @app.route('/api/plan-comparison', methods=['GET'])
 def plan_comparison():
@@ -2102,6 +2546,7 @@ def plan_comparison():
     })
 
 @app.route('/')
+@domain_validation_required
 @token_required
 def home(user_data):
     firebase_check = check_firebase()
@@ -2161,7 +2606,7 @@ def home(user_data):
                 "delete_channel": "DELETE /api/canales/<id>"
             })
     
-    return jsonify({
+    response_data = {
         "message": f"🎬 API de Streaming - {welcome_msg}",
         "version": "2.0.0",
         "user": user_data.get('username'),
@@ -2191,13 +2636,24 @@ def home(user_data):
             "change_plan": "POST /api/admin/change-plan",
             "regenerate_token": "POST /api/admin/regenerate-token",
             "usage_statistics": "GET /api/admin/usage-statistics",
-            "reconnect_firebase": "POST /api/connection/reconnect"
+            "reconnect_firebase": "POST /api/connection/reconnect",
+            # NUEVO: Endpoints de aplicaciones
+            "register_application": "POST /api/admin/applications/register",
+            "list_applications": "GET /api/admin/applications",
+            "manage_applications": "PUT/DELETE /api/admin/applications/<client_id>"
         } if user_data.get('is_admin') else None,
         "instructions": "Incluya el token en el header: Authorization: Bearer {token}"
-    })
+    }
+    
+    # Agregar información de la aplicación si se usó autenticación por aplicación
+    if hasattr(request, 'application_context'):
+        response_data["application_context"] = request.application_context
+    
+    return jsonify(response_data)
 
-# Endpoints de contenido (todos requieren token) - EXISTENTES
+# Endpoints de contenido (todos requieren token) - EXISTENTES CON VALIDACIÓN DE DOMINIO
 @app.route('/api/peliculas', methods=['GET'])
+@domain_validation_required
 @token_required
 def get_peliculas(user_data):
     firebase_check = check_firebase()
@@ -2235,18 +2691,25 @@ def get_peliculas(user_data):
                 pelicula_data = limit_content_info(pelicula_data, 'pelicula')
             peliculas.append(pelicula_data)
         
-        return jsonify({
+        response_data = {
             "success": True,
             "count": len(peliculas),
             "page": page,
             "limit": limit,
             "plan_restrictions": user_data.get('plan_type') == 'free' and not user_data.get('is_admin'),
             "data": peliculas
-        })
+        }
+        
+        # Agregar información de la aplicación si se usó autenticación por aplicación
+        if hasattr(request, 'application_context'):
+            response_data["application_context"] = request.application_context
+        
+        return jsonify(response_data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/peliculas/<pelicula_id>', methods=['GET'])
+@domain_validation_required
 @token_required
 def get_pelicula(user_data, pelicula_id):
     firebase_check = check_firebase()
@@ -2260,10 +2723,17 @@ def get_pelicula(user_data, pelicula_id):
             # ✅ MODIFICADO: Usuarios free ven los enlaces pero con límites de uso
             if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
                 pelicula_data = limit_content_info(pelicula_data, 'pelicula')
-            return jsonify({
+            
+            response_data = {
                 "success": True,
                 "data": pelicula_data
-            })
+            }
+            
+            # Agregar información de la aplicación si se usó autenticación por aplicación
+            if hasattr(request, 'application_context'):
+                response_data["application_context"] = request.application_context
+            
+            return jsonify(response_data)
         else:
             return jsonify({"error": "Película no encontrada"}), 404
     except Exception as e:
@@ -2271,6 +2741,7 @@ def get_pelicula(user_data, pelicula_id):
 
 # ENDPOINT ACTUALIZADO: Series para todos los usuarios
 @app.route('/api/series', methods=['GET'])
+@domain_validation_required
 @token_required
 def get_series(user_data):
     """Obtener todas las series (todos los usuarios)"""
@@ -2292,16 +2763,23 @@ def get_series(user_data):
                     serie_data = limit_content_info(serie_data, 'serie')
                 series.append(serie_data)
         
-        return jsonify({
+        response_data = {
             "success": True,
             "count": len(series),
             "plan_restrictions": user_data.get('plan_type') == 'free' and not user_data.get('is_admin'),
             "data": series
-        })
+        }
+        
+        # Agregar información de la aplicación si se usó autenticación por aplicación
+        if hasattr(request, 'application_context'):
+            response_data["application_context"] = request.application_context
+        
+        return jsonify(response_data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/series/<serie_id>', methods=['GET'])
+@domain_validation_required
 @token_required
 def get_serie(user_data, serie_id):
     """Obtener serie específica (todos los usuarios)"""
@@ -2319,10 +2797,17 @@ def get_serie(user_data, serie_id):
                 # Para usuarios free, limitar información pero mostrar disponibilidad
                 if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
                     serie_data = limit_content_info(serie_data, 'serie')
-                return jsonify({
+                
+                response_data = {
                     "success": True,
                     "data": serie_data
-                })
+                }
+                
+                # Agregar información de la aplicación si se usó autenticación por aplicación
+                if hasattr(request, 'application_context'):
+                    response_data["application_context"] = request.application_context
+                
+                return jsonify(response_data)
             else:
                 return jsonify({"error": "No es una serie válida"}), 404
         else:
@@ -2331,6 +2816,7 @@ def get_serie(user_data, serie_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/canales', methods=['GET'])
+@domain_validation_required
 @token_required
 def get_canales(user_data):
     firebase_check = check_firebase()
@@ -2346,16 +2832,24 @@ def get_canales(user_data):
             if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
                 canal_data = limit_content_info(canal_data, 'canal')
             canales.append(canal_data)
-        return jsonify({
+        
+        response_data = {
             "success": True,
             "count": len(canales),
             "plan_restrictions": user_data.get('plan_type') == 'free' and not user_data.get('is_admin'),
             "data": canales
-        })
+        }
+        
+        # Agregar información de la aplicación si se usó autenticación por aplicación
+        if hasattr(request, 'application_context'):
+            response_data["application_context"] = request.application_context
+        
+        return jsonify(response_data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/canales/<canal_id>', methods=['GET'])
+@domain_validation_required
 @token_required
 def get_canal(user_data, canal_id):
     firebase_check = check_firebase()
@@ -2369,16 +2863,24 @@ def get_canal(user_data, canal_id):
             # Para usuarios free, limitar información pero mostrar disponibilidad
             if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
                 canal_data = limit_content_info(canal_data, 'canal')
-            return jsonify({
+            
+            response_data = {
                 "success": True,
                 "data": canal_data
-            })
+            }
+            
+            # Agregar información de la aplicación si se usó autenticación por aplicación
+            if hasattr(request, 'application_context'):
+                response_data["application_context"] = request.application_context
+            
+            return jsonify(response_data)
         else:
             return jsonify({"error": "Canal no encontrado"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/buscar', methods=['GET'])
+@domain_validation_required
 @token_required
 def buscar(user_data):
     firebase_check = check_firebase()
@@ -2422,19 +2924,26 @@ def buscar(user_data):
                     data = limit_content_info(data, 'serie')
                 resultados.append(data)
         
-        return jsonify({
+        response_data = {
             "success": True,
             "termino": termino,
             "count": len(resultados),
             "search_limit": search_limit,
             "plan_type": 'premium' if user_data.get('is_admin') else user_data.get('plan_type', 'free'),
             "data": resultados
-        })
+        }
+        
+        # Agregar información de la aplicación si se usó autenticación por aplicación
+        if hasattr(request, 'application_context'):
+            response_data["application_context"] = request.application_context
+        
+        return jsonify(response_data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ENDPOINT DE STREAM ACTUALIZADO CON LÍMITES
+# ENDPOINT DE STREAM ACTUALIZADO CON LÍMITES Y VALIDACIÓN DE DOMINIO
 @app.route('/api/stream/<content_id>', methods=['GET'])
+@domain_validation_required
 @token_required
 def get_stream_url(user_data, content_id):
     """Obtener URL de streaming con límites diarios para free"""
@@ -2507,20 +3016,27 @@ def get_stream_url(user_data, content_id):
                         streaming_url = stream_options[0].get('stream_url')
         
         if streaming_url:
-            return jsonify({
+            response_data = {
                 "success": True,
                 "streaming_url": streaming_url,
                 "content_type": content_type,
                 "expires_in": 3600,
                 "quality": "HD",
                 "stream_counted": True if not user_data.get('is_admin') and user_data.get('plan_type') == 'free' else False
-            })
+            }
+            
+            # Agregar información de la aplicación si se usó autenticación por aplicación
+            if hasattr(request, 'application_context'):
+                response_data["application_context"] = request.application_context
+            
+            return jsonify(response_data)
         else:
             return jsonify({"error": "URL de streaming no disponible"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/estadisticas', methods=['GET'])
+@domain_validation_required
 @token_required
 def get_estadisticas(user_data):
     firebase_check = check_firebase()
@@ -2537,7 +3053,8 @@ def get_estadisticas(user_data):
             if data.get('seasons'):
                 series_count += 1
         canales_count = len(list(db.collection('canales').limit(1000).stream()))
-        return jsonify({
+        
+        response_data = {
             "success": True,
             "data": {
                 "total_peliculas": peliculas_count,
@@ -2545,7 +3062,13 @@ def get_estadisticas(user_data):
                 "total_canales": canales_count,
                 "total_contenido": peliculas_count + series_count
             }
-        })
+        }
+        
+        # Agregar información de la aplicación si se usó autenticación por aplicación
+        if hasattr(request, 'application_context'):
+            response_data["application_context"] = request.application_context
+        
+        return jsonify(response_data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
