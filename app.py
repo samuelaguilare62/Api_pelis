@@ -590,7 +590,7 @@ def validate_series_structure(data):
         else:
             if 'year' in details and not isinstance(details['year'], str):
                 errors.append("El campo 'year' en details debe ser string")
-            if 'genres' en details and not isinstance(details['genres'], list):
+            if 'genres' in details and not isinstance(details['genres'], list):
                 errors.append("El campo 'genres' en details debe ser un array")
             if 'total_seasons' in details and not isinstance(details['total_seasons'], int):
                 errors.append("El campo 'total_seasons' en details debe ser número entero")
