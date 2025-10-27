@@ -436,7 +436,7 @@ def notify_limit_reached(user_data, limit_type, current_usage, limit, reset_time
     except Exception as e:
         print(f"❌ Error en notificación de límite: {e}")
 
-# FUNCIONES PARA NORMALIZAR DATOS DE LA BASE DE DATOS
+# FUNCIONES PARA NORMALIZAR DATOS DE LA BASE DE DATOS - ACTUALIZADAS
 def normalize_movie_data(movie_data, doc_id=None):
     if doc_id:
         movie_data['id'] = doc_id
@@ -452,7 +452,10 @@ def normalize_movie_data(movie_data, doc_id=None):
         'actors': movie_data.get('details', {}).get('actors', []) if movie_data.get('details') else [],
         'duration': movie_data.get('details', {}).get('duration', '') if movie_data.get('details') else '',
         'director': movie_data.get('details', {}).get('director', '') if movie_data.get('details') else '',
-        'play_links': movie_data.get('play_links', [])
+        'play_links': movie_data.get('play_links', []),
+        # ✅ NUEVOS CAMPOS AGREGADOS
+        'type': movie_data.get('type', ''),  # Para identificar si es Anime
+        'add': movie_data.get('add', '')     # Para identificar si es recién agregado
     }
     return {k: v for k, v in normalized.items() if v not in [None, '', [], {}]}
 
@@ -469,10 +472,13 @@ def normalize_series_data(series_data, doc_id=None):
         'rating': series_data.get('details', {}).get('rating', '') if series_data.get('details') else series_data.get('rating', ''),
         'total_seasons': series_data.get('details', {}).get('total_seasons', 0) if series_data.get('details') else 0,
         'status': series_data.get('details', {}).get('status', '') if series_data.get('details') else '',
-        'seasons': normalize_seasons_data(series_data.get('seasons', {}))
+        'seasons': normalize_seasons_data(series_data.get('seasons', {})),
+        # ✅ NUEVOS CAMPOS AGREGADOS
+        'type': series_data.get('type', ''),  # Para identificar si es Anime
+        'add': series_data.get('add', '')     # Para identificar si es recién agregado
     }
     return {k: v for k, v in normalized.items() if v not in [None, '', [], {}, 0]}
-
+    
 def normalize_seasons_data(seasons_dict):
     if not seasons_dict:
         return []
@@ -557,6 +563,13 @@ def validate_movie_structure(data):
                     if not link.get('url'):
                         errors.append(f"play_links[{i}] debe tener campo 'url'")
     
+    # ✅ NUEVO: Validar campos opcionales type y add
+    if 'type' in data and data['type'] not in ['', 'Anime']:
+        errors.append("El campo 'type' solo puede estar vacío o ser 'Anime'")
+    
+    if 'add' in data and data['add'] not in ['', 'yes']:
+        errors.append("El campo 'add' solo puede estar vacío o ser 'yes'")
+    
     return errors
 
 def validate_series_structure(data):
@@ -603,6 +616,13 @@ def validate_series_structure(data):
                             for ep_key, ep_data in episodes.items():
                                 if not ep_key.startswith('episode-'):
                                     errors.append(f"La clave de episodio '{ep_key}' debe empezar con 'episode-'")
+    
+    # ✅ NUEVO: Validar campos opcionales type y add
+    if 'type' in data and data['type'] not in ['', 'Anime']:
+        errors.append("El campo 'type' solo puede estar vacío o ser 'Anime'")
+    
+    if 'add' in data and data['add'] not in ['', 'yes']:
+        errors.append("El campo 'add' solo puede estar vacío o ser 'yes'")
     
     return errors
 
