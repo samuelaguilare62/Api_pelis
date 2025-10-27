@@ -524,6 +524,109 @@ def normalize_channel_data(channel_data, doc_id=None):
     }
     return {k: v for k, v in normalized.items() if v not in [None, '', [], {}]}
 
+@app.route('/api/contenido/recientes', methods=['GET'])
+@token_required
+def get_contenido_reciente(user_data):
+    """Obtener películas y series recientemente agregadas (add: 'yes')"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    try:
+        limit = int(request.args.get('limit', 12))
+        
+        # Obtener películas recientes
+        peliculas_ref = db.collection('peliculas')
+        peliculas_query = peliculas_ref.where('add', '==', 'yes').limit(limit)
+        peliculas_docs = peliculas_query.stream()
+        
+        peliculas_recientes = []
+        for doc in peliculas_docs:
+            pelicula_data = normalize_movie_data(doc.to_dict(), doc.id)
+            pelicula_data['tipo'] = 'pelicula'
+            peliculas_recientes.append(pelicula_data)
+        
+        # Obtener series recientes
+        series_ref = db.collection('contenido')
+        series_query = series_ref.where('add', '==', 'yes').limit(limit)
+        series_docs = series_query.stream()
+        
+        series_recientes = []
+        for doc in series_docs:
+            serie_data = doc.to_dict()
+            if serie_data.get('seasons'):
+                serie_data = normalize_series_data(serie_data, doc.id)
+                serie_data['tipo'] = 'serie'
+                series_recientes.append(serie_data)
+        
+        # Combinar y ordenar por fecha (si existe)
+        contenido_reciente = peliculas_recientes + series_recientes
+        
+        # Ordenar por fecha de creación si está disponible
+        contenido_reciente.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        
+        # Limitar el resultado final
+        contenido_reciente = contenido_reciente[:limit]
+        
+        return jsonify({
+            "success": True,
+            "count": len(contenido_reciente),
+            "data": contenido_reciente
+        })
+        
+    except Exception as e:
+        print(f"Error obteniendo contenido reciente: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/contenido/animes', methods=['GET'])
+@token_required
+def get_animes(user_data):
+    """Obtener películas y series de tipo Anime"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    try:
+        limit = int(request.args.get('limit', 12))
+        
+        # Obtener películas anime
+        peliculas_ref = db.collection('peliculas')
+        peliculas_query = peliculas_ref.where('type', '==', 'Anime').limit(limit)
+        peliculas_docs = peliculas_query.stream()
+        
+        peliculas_anime = []
+        for doc in peliculas_docs:
+            pelicula_data = normalize_movie_data(doc.to_dict(), doc.id)
+            pelicula_data['tipo'] = 'pelicula'
+            peliculas_anime.append(pelicula_data)
+        
+        # Obtener series anime
+        series_ref = db.collection('contenido')
+        series_query = series_ref.where('type', '==', 'Anime').limit(limit)
+        series_docs = series_query.stream()
+        
+        series_anime = []
+        for doc in series_docs:
+            serie_data = doc.to_dict()
+            if serie_data.get('seasons'):
+                serie_data = normalize_series_data(serie_data, doc.id)
+                serie_data['tipo'] = 'serie'
+                series_anime.append(serie_data)
+        
+        # Combinar resultados
+        animes = peliculas_anime + series_anime
+        animes = animes[:limit]  # Limitar el resultado final
+        
+        return jsonify({
+            "success": True,
+            "count": len(animes),
+            "data": animes
+        })
+        
+    except Exception as e:
+        print(f"Error obteniendo animes: {e}")
+        return jsonify({"error": str(e)}), 500
+
 # FUNCIONES PARA VALIDACIÓN DE ESTRUCTURAS
 def validate_movie_structure(data):
     """Valida que la estructura de película coincida con la documentación"""
