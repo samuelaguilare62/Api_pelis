@@ -524,109 +524,6 @@ def normalize_channel_data(channel_data, doc_id=None):
     }
     return {k: v for k, v in normalized.items() if v not in [None, '', [], {}]}
 
-@app.route('/api/contenido/recientes', methods=['GET'])
-@token_required
-def get_contenido_reciente(user_data):
-    """Obtener películas y series recientemente agregadas (add: 'yes')"""
-    firebase_check = check_firebase()
-    if firebase_check:
-        return firebase_check
-    
-    try:
-        limit = int(request.args.get('limit', 12))
-        
-        # Obtener películas recientes
-        peliculas_ref = db.collection('peliculas')
-        peliculas_query = peliculas_ref.where('add', '==', 'yes').limit(limit)
-        peliculas_docs = peliculas_query.stream()
-        
-        peliculas_recientes = []
-        for doc in peliculas_docs:
-            pelicula_data = normalize_movie_data(doc.to_dict(), doc.id)
-            pelicula_data['tipo'] = 'pelicula'
-            peliculas_recientes.append(pelicula_data)
-        
-        # Obtener series recientes
-        series_ref = db.collection('contenido')
-        series_query = series_ref.where('add', '==', 'yes').limit(limit)
-        series_docs = series_query.stream()
-        
-        series_recientes = []
-        for doc in series_docs:
-            serie_data = doc.to_dict()
-            if serie_data.get('seasons'):
-                serie_data = normalize_series_data(serie_data, doc.id)
-                serie_data['tipo'] = 'serie'
-                series_recientes.append(serie_data)
-        
-        # Combinar y ordenar por fecha (si existe)
-        contenido_reciente = peliculas_recientes + series_recientes
-        
-        # Ordenar por fecha de creación si está disponible
-        contenido_reciente.sort(key=lambda x: x.get('created_at', ''), reverse=True)
-        
-        # Limitar el resultado final
-        contenido_reciente = contenido_reciente[:limit]
-        
-        return jsonify({
-            "success": True,
-            "count": len(contenido_reciente),
-            "data": contenido_reciente
-        })
-        
-    except Exception as e:
-        print(f"Error obteniendo contenido reciente: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/contenido/animes', methods=['GET'])
-@token_required
-def get_animes(user_data):
-    """Obtener películas y series de tipo Anime"""
-    firebase_check = check_firebase()
-    if firebase_check:
-        return firebase_check
-    
-    try:
-        limit = int(request.args.get('limit', 12))
-        
-        # Obtener películas anime
-        peliculas_ref = db.collection('peliculas')
-        peliculas_query = peliculas_ref.where('type', '==', 'Anime').limit(limit)
-        peliculas_docs = peliculas_query.stream()
-        
-        peliculas_anime = []
-        for doc in peliculas_docs:
-            pelicula_data = normalize_movie_data(doc.to_dict(), doc.id)
-            pelicula_data['tipo'] = 'pelicula'
-            peliculas_anime.append(pelicula_data)
-        
-        # Obtener series anime
-        series_ref = db.collection('contenido')
-        series_query = series_ref.where('type', '==', 'Anime').limit(limit)
-        series_docs = series_query.stream()
-        
-        series_anime = []
-        for doc in series_docs:
-            serie_data = doc.to_dict()
-            if serie_data.get('seasons'):
-                serie_data = normalize_series_data(serie_data, doc.id)
-                serie_data['tipo'] = 'serie'
-                series_anime.append(serie_data)
-        
-        # Combinar resultados
-        animes = peliculas_anime + series_anime
-        animes = animes[:limit]  # Limitar el resultado final
-        
-        return jsonify({
-            "success": True,
-            "count": len(animes),
-            "data": animes
-        })
-        
-    except Exception as e:
-        print(f"Error obteniendo animes: {e}")
-        return jsonify({"error": str(e)}), 500
-
 # FUNCIONES PARA VALIDACIÓN DE ESTRUCTURAS
 def validate_movie_structure(data):
     """Valida que la estructura de película coincida con la documentación"""
@@ -693,7 +590,7 @@ def validate_series_structure(data):
         else:
             if 'year' in details and not isinstance(details['year'], str):
                 errors.append("El campo 'year' en details debe ser string")
-            if 'genres' in details and not isinstance(details['genres'], list):
+            if 'genres' en details and not isinstance(details['genres'], list):
                 errors.append("El campo 'genres' en details debe ser un array")
             if 'total_seasons' in details and not isinstance(details['total_seasons'], int):
                 errors.append("El campo 'total_seasons' en details debe ser número entero")
@@ -1162,26 +1059,9 @@ def check_usage_limits(user_data):
         print(f"Error verificando límites de uso: {e}")
         return {"error": f"Error interno verificando límites: {str(e)}"}, 500
 
-# Middleware de seguridad global
-@app.before_request
-def before_request():
-    ip_address = request.remote_addr
-    ip_limit_check = check_ip_rate_limit(ip_address)
-    if ip_limit_check:
-        return jsonify(ip_limit_check[0]), ip_limit_check[1]
-    if request.endpoint and 'admin' not in request.endpoint:
-        print(f"📥 Request: {request.method} {request.path} from {ip_address}")
-
-@app.after_request
-def after_request(response):
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['X-XSS-Protection'] = '1; mode=block'
-    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
-    response.headers['Content-Security-Policy'] = "default-src 'self'"
-    if request.path.startswith('/api/admin') or request.path.startswith('/api/user'):
-        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-    return response
+# =============================================
+# DECORADORES DE AUTENTICACIÓN (DEFINIDOS ANTES DE SU USO)
+# =============================================
 
 # Decorador para requerir autenticación
 def token_required(f):
@@ -1259,6 +1139,35 @@ def check_plan_feature(feature_name):
             return f(user_data, *args, **kwargs)
         return decorated_function
     return decorator
+
+# =============================================
+# MIDDLEWARE DE SEGURIDAD GLOBAL
+# =============================================
+
+# Middleware de seguridad global
+@app.before_request
+def before_request():
+    ip_address = request.remote_addr
+    ip_limit_check = check_ip_rate_limit(ip_address)
+    if ip_limit_check:
+        return jsonify(ip_limit_check[0]), ip_limit_check[1]
+    if request.endpoint and 'admin' not in request.endpoint:
+        print(f"📥 Request: {request.method} {request.path} from {ip_address}")
+
+@app.after_request
+def after_request(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    response.headers['Content-Security-Policy'] = "default-src 'self'"
+    if request.path.startswith('/api/admin') or request.path.startswith('/api/user'):
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return response
+
+# =============================================
+# FUNCIONES AUXILIARES
+# =============================================
 
 # Generar token único
 def generate_unique_token():
@@ -1426,6 +1335,113 @@ def diagnostic():
             "reconnect": "🔒 /api/connection/reconnect (admin)"
         }
     })
+
+# =============================================
+# ENDPOINTS DE CONTENIDO (ACTUALIZADOS)
+# =============================================
+
+@app.route('/api/contenido/recientes', methods=['GET'])
+@token_required
+def get_contenido_reciente(user_data):
+    """Obtener películas y series recientemente agregadas (add: 'yes')"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    try:
+        limit = int(request.args.get('limit', 12))
+        
+        # Obtener películas recientes
+        peliculas_ref = db.collection('peliculas')
+        peliculas_query = peliculas_ref.where('add', '==', 'yes').limit(limit)
+        peliculas_docs = peliculas_query.stream()
+        
+        peliculas_recientes = []
+        for doc in peliculas_docs:
+            pelicula_data = normalize_movie_data(doc.to_dict(), doc.id)
+            pelicula_data['tipo'] = 'pelicula'
+            peliculas_recientes.append(pelicula_data)
+        
+        # Obtener series recientes
+        series_ref = db.collection('contenido')
+        series_query = series_ref.where('add', '==', 'yes').limit(limit)
+        series_docs = series_query.stream()
+        
+        series_recientes = []
+        for doc in series_docs:
+            serie_data = doc.to_dict()
+            if serie_data.get('seasons'):
+                serie_data = normalize_series_data(serie_data, doc.id)
+                serie_data['tipo'] = 'serie'
+                series_recientes.append(serie_data)
+        
+        # Combinar y ordenar por fecha (si existe)
+        contenido_reciente = peliculas_recientes + series_recientes
+        
+        # Ordenar por fecha de creación si está disponible
+        contenido_reciente.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        
+        # Limitar el resultado final
+        contenido_reciente = contenido_reciente[:limit]
+        
+        return jsonify({
+            "success": True,
+            "count": len(contenido_reciente),
+            "data": contenido_reciente
+        })
+        
+    except Exception as e:
+        print(f"Error obteniendo contenido reciente: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/contenido/animes', methods=['GET'])
+@token_required
+def get_animes(user_data):
+    """Obtener películas y series de tipo Anime"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    try:
+        limit = int(request.args.get('limit', 12))
+        
+        # Obtener películas anime
+        peliculas_ref = db.collection('peliculas')
+        peliculas_query = peliculas_ref.where('type', '==', 'Anime').limit(limit)
+        peliculas_docs = peliculas_query.stream()
+        
+        peliculas_anime = []
+        for doc in peliculas_docs:
+            pelicula_data = normalize_movie_data(doc.to_dict(), doc.id)
+            pelicula_data['tipo'] = 'pelicula'
+            peliculas_anime.append(pelicula_data)
+        
+        # Obtener series anime
+        series_ref = db.collection('contenido')
+        series_query = series_ref.where('type', '==', 'Anime').limit(limit)
+        series_docs = series_query.stream()
+        
+        series_anime = []
+        for doc in series_docs:
+            serie_data = doc.to_dict()
+            if serie_data.get('seasons'):
+                serie_data = normalize_series_data(serie_data, doc.id)
+                serie_data['tipo'] = 'serie'
+                series_anime.append(serie_data)
+        
+        # Combinar resultados
+        animes = peliculas_anime + series_anime
+        animes = animes[:limit]  # Limitar el resultado final
+        
+        return jsonify({
+            "success": True,
+            "count": len(animes),
+            "data": animes
+        })
+        
+    except Exception as e:
+        print(f"Error obteniendo animes: {e}")
+        return jsonify({"error": str(e)}), 500
 
 # =============================================
 # ENDPOINTS DE ADMINISTRACIÓN (SOLO ADMINS)
@@ -3103,7 +3119,7 @@ def get_stream_url(user_data, content_id):
                     else:
                         return jsonify({"error": "Episodio no encontrado"}), 404
                 else:
-                    return jsonify({"error": "Temporada no encontrada"}), 404
+                    return jsonify({"error": "Temporada no encontrado"}), 404
             else:
                 content_ref = db.collection('canales').document(content_id)
                 content_doc = content_ref.get()
