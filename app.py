@@ -1184,6 +1184,176 @@ def validate_username(username):
     pattern = r'^[a-zA-Z0-9_-]+$'
     return re.match(pattern, username) is not None
 
+@app.route('/api/auth/register', methods=['POST'])
+def public_register():
+    """Registro público para usuarios nuevos (siempre plan FREE)"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Datos JSON requeridos"}), 400
+        
+        username = data.get('username')
+        email = data.get('email')
+        password = data.get('password')  # Opcional para futura autenticación
+        
+        if not username or not email:
+            return jsonify({"error": "Username y email son requeridos"}), 400
+        
+        if not validate_username(username):
+            return jsonify({"error": "Username inválido"}), 400
+        
+        if not validate_email(email):
+            return jsonify({"error": "Email inválido"}), 400
+        
+        # Verificar si el usuario ya existe
+        users_ref = db.collection(TOKENS_COLLECTION)
+        existing_user = users_ref.where('email', '==', email).limit(1).stream()
+        if any(existing_user):
+            return jsonify({"error": "El email ya está registrado"}), 400
+        
+        # Generar token único
+        token = generate_unique_token()
+        current_time = time.time()
+        
+        # CREAR USUARIO SIEMPRE CON PLAN FREE
+        user_data = {
+            'username': username,
+            'email': email,
+            'token': token,
+            'active': True,
+            'is_admin': False,
+            'plan_type': 'free',  # SIEMPRE FREE POR DEFECTO
+            'created_at': firestore.SERVER_TIMESTAMP,
+            'last_used': None,
+            'total_usage_count': 0,
+            'daily_usage_count': 0,
+            'session_usage_count': 0,
+            'daily_streams_used': 0,
+            'total_streams_count': 0,
+            'daily_reset_timestamp': current_time,
+            'daily_streams_reset_timestamp': current_time,
+            'session_start_timestamp': current_time,
+            'max_requests_per_day': PLAN_CONFIG['free']['daily_limit'],
+            'max_requests_per_session': PLAN_CONFIG['free']['session_limit'],
+            'max_daily_streams': PLAN_CONFIG['free']['daily_streams_limit'],
+            'features': PLAN_CONFIG['free']['features'],
+            'allowed_domains': [],  # Sin restricciones iniciales
+            'is_frontend_token': False
+        }
+        
+        # Guardar usuario
+        user_ref = users_ref.document()
+        user_ref.set(user_data)
+        
+        return jsonify({
+            "success": True,
+            "message": "Usuario registrado exitosamente",
+            "user": {
+                "user_id": user_ref.id,
+                "username": username,
+                "email": email,
+                "token": token,
+                "plan_type": "free"
+            },
+            "limits": {
+                "daily": PLAN_CONFIG['free']['daily_limit'],
+                "session": PLAN_CONFIG['free']['session_limit'],
+                "daily_streams": PLAN_CONFIG['free']['daily_streams_limit']
+            }
+        }), 201
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/auth/login', methods=['POST'])
+def public_login():
+    """Login público usando token (para app móvil)"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Datos JSON requeridos"}), 400
+        
+        token = data.get('token')
+        
+        if not token:
+            return jsonify({"error": "Token requerido"}), 400
+        
+        # Verificar token en la base de datos
+        users_ref = db.collection(TOKENS_COLLECTION)
+        query = users_ref.where('token', '==', token).limit(1).stream()
+        
+        user_data = None
+        user_id = None
+        for doc in query:
+            user_data = doc.to_dict()
+            user_id = doc.id
+            break
+        
+        if not user_data:
+            return jsonify({"error": "Token inválido"}), 401
+        
+        if not user_data.get('active', True):
+            return jsonify({"error": "Cuenta desactivada"}), 401
+        
+        # Actualizar último acceso
+        users_ref.document(user_id).update({
+            'last_used': firestore.SERVER_TIMESTAMP
+        })
+        
+        # Preparar respuesta
+        user_response = {
+            "user_id": user_id,
+            "username": user_data.get('username'),
+            "email": user_data.get('email'),
+            "token": token,
+            "plan_type": user_data.get('plan_type', 'free'),
+            "is_admin": user_data.get('is_admin', False),
+            "active": user_data.get('active', True)
+        }
+        
+        return jsonify({
+            "success": True,
+            "message": "Login exitoso",
+            "user": user_response
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/auth/verify', methods=['GET'])
+def verify_token():
+    """Verificar si un token es válido"""
+    token = request.args.get('token')
+    
+    if not token:
+        return jsonify({"error": "Token requerido"}), 400
+    
+    try:
+        users_ref = db.collection(TOKENS_COLLECTION)
+        query = users_ref.where('token', '==', token).limit(1).stream()
+        
+        for doc in query:
+            user_data = doc.to_dict()
+            if user_data.get('active', True):
+                return jsonify({
+                    "success": True,
+                    "valid": True,
+                    "user": {
+                        "user_id": doc.id,
+                        "username": user_data.get('username'),
+                        "plan_type": user_data.get('plan_type', 'free')
+                    }
+                })
+        
+        return jsonify({
+            "success": True,
+            "valid": False,
+            "message": "Token inválido o cuenta inactiva"
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # =============================================
 # ENDPOINTS DE CONEXIÓN Y RECONEXIÓN
 # =============================================
