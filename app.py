@@ -2941,13 +2941,13 @@ def get_peliculas(user_data):
         return jsonify(collection_check[0]), collection_check[1]
     
     try:
-        limit = int(request.args.get('limit', 20))
+        limit = int(request.args.get('limit', 1000))
         page = int(request.args.get('page', 1))
         
         # Admin y premium no tienen límites
         if user_data.get('is_admin') or user_data.get('plan_type') == 'premium':
-            max_offset = 10000
-            limit = min(limit, 100)
+            max_offset = 100000
+            limit = min(limit, 10000)
         else:
             limit = min(limit, 10)
             max_offset = 50
@@ -3016,37 +3016,79 @@ def get_pelicula(user_data, pelicula_id):
 @app.route('/api/series', methods=['GET'])
 @token_required
 def get_series(user_data):
-    """Obtener todas las series (todos los usuarios)"""
+    """Obtener todas las series (SIN LÍMITES para premium/admin)"""
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
     
-    # ✅ NUEVO: Verificar acceso a la colección para tokens web
+    # ✅ Verificar acceso a la colección para tokens web
     collection_check = check_collection_access(user_data, 'contenido')
     if collection_check:
         return jsonify(collection_check[0]), collection_check[1]
     
     try:
-        limit = int(request.args.get('limit', 20))
-        series_ref = db.collection('contenido')
-        docs = series_ref.limit(limit).stream()
+        # ✅ SIN LÍMITES para premium/admin - LÍMITES ALTOS para free
+        if user_data.get('is_admin') or user_data.get('plan_type') == 'premium':
+            # Premium/Admin: límites muy altos o sin límites
+            default_limit = 10000  # Default muy alto
+            max_limit = 50000      # Límite máximo muy alto
+            requested_limit = int(request.args.get('limit', default_limit))
+            limit = min(requested_limit, max_limit)
+            
+            series_ref = db.collection('contenido')
+            
+            # ✅ Si el límite solicitado es muy alto, obtener TODO sin límite
+            if requested_limit >= 5000:
+                print(f"🔍 Obteniendo TODAS las series para premium/admin (sin límite)")
+                docs = series_ref.stream()
+            else:
+                print(f"🔍 Obteniendo {limit} series para premium/admin")
+                docs = series_ref.limit(limit).stream()
+                
+        else:
+            # ✅ Free: mantiene límites normales
+            default_limit = 20
+            max_limit = 50
+            requested_limit = int(request.args.get('limit', default_limit))
+            limit = min(requested_limit, max_limit)
+            
+            series_ref = db.collection('contenido')
+            docs = series_ref.limit(limit).stream()
+            print(f"🔍 Obteniendo {limit} series para usuario free")
+        
         series = []
+        series_count = 0
+        non_series_count = 0
+        
         for doc in docs:
             serie_data = doc.to_dict()
             if serie_data.get('seasons'):
+                # ✅ Es una serie válida
                 serie_data = normalize_series_data(serie_data, doc.id)
                 # Para usuarios free, limitar información pero mostrar disponibilidad
                 if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
                     serie_data = limit_content_info(serie_data, 'serie')
                 series.append(serie_data)
+                series_count += 1
+            else:
+                # ❌ Documento sin estructura de serie
+                non_series_count += 1
+        
+        print(f"✅ Series encontradas: {series_count}, No-series: {non_series_count}")
         
         return jsonify({
             "success": True,
             "count": len(series),
+            "total_series": series_count,
+            "non_series_documents": non_series_count,
+            "limit_applied": limit,
+            "plan_type": 'premium' if user_data.get('is_admin') else user_data.get('plan_type', 'free'),
+            "unlimited_access": user_data.get('is_admin') or user_data.get('plan_type') == 'premium',
             "plan_restrictions": user_data.get('plan_type') == 'free' and not user_data.get('is_admin'),
             "data": series
         })
     except Exception as e:
+        print(f"❌ Error obteniendo series: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/series/<serie_id>', methods=['GET'])
