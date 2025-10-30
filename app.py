@@ -2699,6 +2699,10 @@ def delete_canal(user_data, canal_id):
 # ENDPOINTS PARA SISTEMA DE REPORTES
 # =============================================
 
+# =============================================
+# ENDPOINTS PARA SISTEMA DE REPORTES
+# =============================================
+
 @app.route('/api/reports', methods=['POST'])
 @token_required
 def create_report(user_data):
@@ -2771,7 +2775,7 @@ def create_report(user_data):
         # Crear ID único para el reporte
         report_id = f"report_{int(time.time())}_{secrets.token_hex(4)}"
         
-        # Preparar datos del reporte
+        # Preparar datos del reporte - USAR time.time() en lugar de SERVER_TIMESTAMP
         report_data = {
             'contentId': data['contentId'],
             'contentType': data['contentType'],
@@ -2782,7 +2786,7 @@ def create_report(user_data):
             'userEmail': data.get('userEmail', ''),
             'userId': user_data.get('user_id', 'anonymous'),
             'username': user_data.get('username', 'anonymous'),
-            'timestamp': firestore.SERVER_TIMESTAMP,
+            'timestamp': time.time(),  # ✅ CORREGIDO: usar time.time() en lugar de SERVER_TIMESTAMP
             'status': 'pending',
             'adminNotes': '',
             'resolvedAt': None,
@@ -2802,11 +2806,14 @@ def create_report(user_data):
         if EMAIL_CONFIG.get('admin_email'):
             send_report_notification(report_data, report_id)
         
+        # Preparar respuesta sin el timestamp de Firebase
+        response_data = report_data.copy()
+        
         return jsonify({
             "success": True,
             "message": "Reporte creado exitosamente",
             "reportId": report_id,
-            "data": report_data
+            "data": response_data
         }), 201
         
     except Exception as e:
@@ -2841,6 +2848,10 @@ def send_report_notification(report_data, report_id):
         
         subject = f"📢 Nuevo Reporte - {content_type_map.get(report_data['contentType'])}"
         
+        # Convertir timestamp a formato legible
+        from datetime import datetime
+        report_time = datetime.fromtimestamp(report_data['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+        
         # Construir mensaje HTML
         message = f"""
         <html>
@@ -2870,6 +2881,10 @@ def send_report_notification(report_data, report_id):
                         <tr>
                             <td style="padding: 5px; font-weight: bold;">Tipo de Reporte:</td>
                             <td style="padding: 5px;">{'Episodio' if report_data['reportType'] == 'episode' else 'General'}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 5px; font-weight: bold;">Fecha:</td>
+                            <td style="padding: 5px;">{report_time}</td>
                         </tr>
                     </table>
                 </div>
@@ -2962,11 +2977,6 @@ def get_reports(user_data):
         for doc in docs:
             report_data = doc.to_dict()
             report_data['id'] = doc.id
-            
-            # Convertir timestamp si es necesario
-            if hasattr(report_data.get('timestamp'), 'timestamp'):
-                report_data['timestamp'] = report_data['timestamp'].timestamp()
-            
             reports.append(report_data)
         
         # Obtener total para paginación (sin filtros para contar total)
@@ -3038,7 +3048,7 @@ def update_report(user_data, report_id):
         
         # Agregar información de resolución si el estado cambia a 'resolved'
         if 'status' in update_data and update_data['status'] == 'resolved':
-            update_data['resolvedAt'] = firestore.SERVER_TIMESTAMP
+            update_data['resolvedAt'] = time.time()  # ✅ CORREGIDO: usar time.time()
             update_data['resolvedBy'] = user_data.get('username', 'admin')
         
         # Actualizar reporte
@@ -3091,9 +3101,8 @@ def get_reports_statistics(user_data):
         
         # Reportes de los últimos 7 días
         week_ago = time.time() - (7 * 24 * 60 * 60)
-        recent_reports = list(db.collection('reports')
-                            .where('timestamp', '>=', firestore.SERVER_TIMESTAMP)
-                            .stream())
+        recent_reports_ref = db.collection('reports').where('timestamp', '>=', week_ago)
+        recent_reports = len(list(recent_reports_ref.stream()))
         
         return jsonify({
             "success": True,
@@ -3102,7 +3111,7 @@ def get_reports_statistics(user_data):
                 "by_status": status_stats,
                 "by_content_type": content_stats,
                 "by_reason": reason_stats,
-                "recent_7_days": len(recent_reports)
+                "recent_7_days": recent_reports
             },
             "timestamp": time.time()
         })
@@ -3110,6 +3119,8 @@ def get_reports_statistics(user_data):
     except Exception as e:
         print(f"Error obteniendo estadísticas de reportes: {e}")
         return jsonify({"error": str(e)}), 500
+                
+
 
 # =============================================
 # ENDPOINTS EXISTENTES PARA USUARIOS NORMALES (ACTUALIZADOS CON CONTROL DE COLECCIONES)
