@@ -460,8 +460,27 @@ def normalize_movie_data(movie_data, doc_id=None):
     return {k: v for k, v in normalized.items() if v not in [None, '', [], {}]}
 
 def normalize_series_data(series_data, doc_id=None):
+    """Normaliza datos de series - MEJORADA"""
     if doc_id:
         series_data['id'] = doc_id
+    
+    # Asegurar que seasons sea una lista
+    seasons_data = series_data.get('seasons', {})
+    normalized_seasons = []
+    
+    if isinstance(seasons_data, dict):
+        for season_key, season_info in seasons_data.items():
+            if isinstance(season_info, dict):
+                season = {
+                    'season_number': season_info.get('season_number', 0),
+                    'episode_count': season_info.get('episode_count', 0),
+                    'year': season_info.get('year', ''),
+                    'episodes': normalize_episodes_data(season_info.get('episodes', {}))
+                }
+                normalized_seasons.append(season)
+    elif isinstance(seasons_data, list):
+        normalized_seasons = seasons_data
+    
     normalized = {
         'id': series_data.get('id'),
         'title': series_data.get('title', ''),
@@ -470,12 +489,11 @@ def normalize_series_data(series_data, doc_id=None):
         'year': series_data.get('details', {}).get('year', '') if series_data.get('details') else series_data.get('year', ''),
         'genre': ', '.join(series_data.get('details', {}).get('genres', [])) if series_data.get('details') and series_data.get('details', {}).get('genres') else series_data.get('genre', ''),
         'rating': series_data.get('details', {}).get('rating', '') if series_data.get('details') else series_data.get('rating', ''),
-        'total_seasons': series_data.get('details', {}).get('total_seasons', 0) if series_data.get('details') else 0,
+        'total_seasons': len(normalized_seasons),
         'status': series_data.get('details', {}).get('status', '') if series_data.get('details') else '',
-        'seasons': normalize_seasons_data(series_data.get('seasons', {})),
-        # ✅ NUEVOS CAMPOS AGREGADOS
-        'type': series_data.get('type', ''),  # Para identificar si es Anime
-        'add': series_data.get('add', '')     # Para identificar si es recién agregado
+        'seasons': normalized_seasons,
+        'type': series_data.get('type', ''),
+        'add': series_data.get('add', '')
     }
     return {k: v for k, v in normalized.items() if v not in [None, '', [], {}, 0]}
     
@@ -3016,92 +3034,51 @@ def get_pelicula(user_data, pelicula_id):
 @app.route('/api/series', methods=['GET'])
 @token_required
 def get_series(user_data):
-    """Obtener todas las series (SIN LÍMITES para premium/admin)"""
+    """Obtener todas las series - CORREGIDO"""
     firebase_check = check_firebase()
     if firebase_check:
         return firebase_check
     
-    # ✅ Verificar acceso a la colección para tokens web
+    # Verificar acceso a la colección para tokens web
     collection_check = check_collection_access(user_data, 'contenido')
     if collection_check:
         return jsonify(collection_check[0]), collection_check[1]
     
     try:
-        # ✅ SIN LÍMITES para premium/admin - LÍMITES ALTOS para free
+        # Límites según plan
         if user_data.get('is_admin') or user_data.get('plan_type') == 'premium':
-            # Premium/Admin: límites muy altos o sin límites
-            default_limit = 10000  # Default muy alto
-            max_limit = 50000      # Límite máximo muy alto
-            requested_limit = int(request.args.get('limit', default_limit))
-            limit = min(requested_limit, max_limit)
-            
-            series_ref = db.collection('contenido')
-            
-            # ✅ Si el límite solicitado es muy alto, obtener TODO sin límite
-            if requested_limit >= 5000:
-                print(f"🔍 Obteniendo TODAS las series para premium/admin (sin límite)")
-                docs = series_ref.stream()
-            else:
-                print(f"🔍 Obteniendo {limit} series para premium/admin")
-                docs = series_ref.limit(limit).stream()
-                
+            limit = min(int(request.args.get('limit', 1000)), 10000)
         else:
-            # ✅ Free: mantiene límites normales
-            default_limit = 20
-            max_limit = 50
-            requested_limit = int(request.args.get('limit', default_limit))
-            limit = min(requested_limit, max_limit)
-            
-            series_ref = db.collection('contenido')
-            docs = series_ref.limit(limit).stream()
-            print(f"🔍 Obteniendo {limit} series para usuario free")
+            limit = min(int(request.args.get('limit', 20)), 50)
+        
+        # Obtener series de la colección 'contenido'
+        series_ref = db.collection('contenido')
+        docs = series_ref.limit(limit).stream()
         
         series = []
-        series_count = 0
-        non_series_count = 0
-        
         for doc in docs:
             try:
                 serie_data = doc.to_dict()
+                # VERIFICAR que sea una serie válida (tiene seasons)
                 if serie_data.get('seasons'):
-                    # ✅ Es una serie válida
                     serie_data = normalize_series_data(serie_data, doc.id)
-                    # Para usuarios free, limitar información pero mostrar disponibilidad
+                    # Para usuarios free, limitar información
                     if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
                         serie_data = limit_content_info(serie_data, 'serie')
                     series.append(serie_data)
-                    series_count += 1
-                else:
-                    # ❌ Documento sin estructura de serie
-                    non_series_count += 1
             except Exception as e:
-                print(f"⚠️ Error procesando documento {doc.id}: {e}")
-                non_series_count += 1
+                print(f"⚠️ Error procesando serie {doc.id}: {e}")
                 continue
         
-        print(f"✅ Series encontradas: {series_count}, No-series: {non_series_count}")
-        
-        # ✅ CORRECCIÓN: Retornar la respuesta correctamente estructurada
-        response_data = {
+        return jsonify({
             "success": True,
             "count": len(series),
-            "total_series": series_count,
-            "non_series_documents": non_series_count,
-            "limit_applied": limit,
-            "plan_type": 'premium' if user_data.get('is_admin') else user_data.get('plan_type', 'free'),
-            "unlimited_access": user_data.get('is_admin') or user_data.get('plan_type') == 'premium',
-            "plan_restrictions": user_data.get('plan_type') == 'free' and not user_data.get('is_admin'),
-            "data": series  # ✅ Esto debe ser una lista, no un diccionario
-        }
-        
-        return jsonify(response_data)
+            "data": series
+        })
         
     except Exception as e:
         print(f"❌ Error obteniendo series: {e}")
-        return jsonify({
-            "success": False,
-            "error": f"Error interno del servidor: {str(e)}"
-        }), 500
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/series/<serie_id>', methods=['GET'])
 @token_required
@@ -3123,7 +3100,9 @@ def get_serie(user_data, serie_id):
             serie_data = doc.to_dict()
             if serie_data.get('seasons'):
                 serie_data = normalize_series_data(serie_data, doc.id)
-                # Para usuarios free, limitar información pero mostrar disponibilidad
+       
+
+         # Para usuarios free, limitar información pero mostrar disponibilidad
                 if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
                     serie_data = limit_content_info(serie_data, 'serie')
                 return jsonify({
