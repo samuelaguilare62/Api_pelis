@@ -3061,22 +3061,28 @@ def get_series(user_data):
         non_series_count = 0
         
         for doc in docs:
-            serie_data = doc.to_dict()
-            if serie_data.get('seasons'):
-                # ✅ Es una serie válida
-                serie_data = normalize_series_data(serie_data, doc.id)
-                # Para usuarios free, limitar información pero mostrar disponibilidad
-                if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
-                    serie_data = limit_content_info(serie_data, 'serie')
-                series.append(serie_data)
-                series_count += 1
-            else:
-                # ❌ Documento sin estructura de serie
+            try:
+                serie_data = doc.to_dict()
+                if serie_data.get('seasons'):
+                    # ✅ Es una serie válida
+                    serie_data = normalize_series_data(serie_data, doc.id)
+                    # Para usuarios free, limitar información pero mostrar disponibilidad
+                    if user_data.get('plan_type') == 'free' and not user_data.get('is_admin'):
+                        serie_data = limit_content_info(serie_data, 'serie')
+                    series.append(serie_data)
+                    series_count += 1
+                else:
+                    # ❌ Documento sin estructura de serie
+                    non_series_count += 1
+            except Exception as e:
+                print(f"⚠️ Error procesando documento {doc.id}: {e}")
                 non_series_count += 1
+                continue
         
         print(f"✅ Series encontradas: {series_count}, No-series: {non_series_count}")
         
-        return jsonify({
+        # ✅ CORRECCIÓN: Retornar la respuesta correctamente estructurada
+        response_data = {
             "success": True,
             "count": len(series),
             "total_series": series_count,
@@ -3085,11 +3091,17 @@ def get_series(user_data):
             "plan_type": 'premium' if user_data.get('is_admin') else user_data.get('plan_type', 'free'),
             "unlimited_access": user_data.get('is_admin') or user_data.get('plan_type') == 'premium',
             "plan_restrictions": user_data.get('plan_type') == 'free' and not user_data.get('is_admin'),
-            "data": series
-        })
+            "data": series  # ✅ Esto debe ser una lista, no un diccionario
+        }
+        
+        return jsonify(response_data)
+        
     except Exception as e:
         print(f"❌ Error obteniendo series: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "success": False,
+            "error": f"Error interno del servidor: {str(e)}"
+        }), 500
 
 @app.route('/api/series/<serie_id>', methods=['GET'])
 @token_required
