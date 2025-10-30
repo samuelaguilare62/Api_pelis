@@ -2696,6 +2696,422 @@ def delete_canal(user_data, canal_id):
         return jsonify({"error": str(e)}), 500
 
 # =============================================
+# ENDPOINTS PARA SISTEMA DE REPORTES
+# =============================================
+
+@app.route('/api/reports', methods=['POST'])
+@token_required
+def create_report(user_data):
+    """Crear un nuevo reporte de contenido"""
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Datos JSON requeridos"}), 400
+        
+        # Validar campos obligatorios
+        required_fields = ['contentId', 'contentType', 'contentTitle', 'reportType', 'reason']
+        for field in required_fields:
+            if not data.get(field):
+                return jsonify({"error": f"Campo requerido faltante: {field}"}), 400
+        
+        # Validar tipos de contenido
+        valid_content_types = ['pelicula', 'serie', 'canal']
+        if data['contentType'] not in valid_content_types:
+            return jsonify({
+                "error": f"Tipo de contenido no válido. Opciones: {valid_content_types}"
+            }), 400
+        
+        # Validar tipos de reporte
+        valid_report_types = ['general', 'episode']
+        if data['reportType'] not in valid_report_types:
+            return jsonify({
+                "error": f"Tipo de reporte no válido. Opciones: {valid_report_types}"
+            }), 400
+        
+        # Validar que el contenido existe
+        content_ref = None
+        if data['contentType'] == 'pelicula':
+            content_ref = db.collection('peliculas').document(data['contentId'])
+        elif data['contentType'] == 'serie':
+            content_ref = db.collection('contenido').document(data['contentId'])
+        elif data['contentType'] == 'canal':
+            content_ref = db.collection('canales').document(data['contentId'])
+        
+        if content_ref:
+            content_doc = content_ref.get()
+            if not content_doc.exists:
+                return jsonify({"error": "El contenido reportado no existe"}), 404
+        
+        # Validar estructura para reportes de episodio
+        if data['reportType'] == 'episode':
+            if not data.get('season') or not data.get('episode'):
+                return jsonify({
+                    "error": "Para reportes de episodio, se requieren season y episode"
+                }), 400
+        
+        # Validar motivos según tipo de contenido y reporte
+        valid_reasons = get_valid_reasons(data['contentType'], data['reportType'])
+        if data['reason'] not in valid_reasons:
+            return jsonify({
+                "error": f"Motivo no válido para este tipo de contenido. Opciones: {valid_reasons}"
+            }), 400
+        
+        # Limitar comentario a 500 caracteres
+        if data.get('comment'):
+            data['comment'] = data['comment'][:500]
+        
+        # Validar email si se proporciona
+        if data.get('userEmail') and not validate_email(data['userEmail']):
+            return jsonify({"error": "Formato de email inválido"}), 400
+        
+        # Crear ID único para el reporte
+        report_id = f"report_{int(time.time())}_{secrets.token_hex(4)}"
+        
+        # Preparar datos del reporte
+        report_data = {
+            'contentId': data['contentId'],
+            'contentType': data['contentType'],
+            'contentTitle': data['contentTitle'],
+            'reportType': data['reportType'],
+            'reason': data['reason'],
+            'comment': data.get('comment', ''),
+            'userEmail': data.get('userEmail', ''),
+            'userId': user_data.get('user_id', 'anonymous'),
+            'username': user_data.get('username', 'anonymous'),
+            'timestamp': firestore.SERVER_TIMESTAMP,
+            'status': 'pending',
+            'adminNotes': '',
+            'resolvedAt': None,
+            'resolvedBy': None
+        }
+        
+        # Agregar información de episodio si aplica
+        if data['reportType'] == 'episode':
+            report_data['season'] = data['season']
+            report_data['episode'] = data['episode']
+        
+        # Guardar en Firebase
+        report_ref = db.collection('reports').document(report_id)
+        report_ref.set(report_data)
+        
+        # Enviar notificación por email (opcional)
+        if EMAIL_CONFIG.get('admin_email'):
+            send_report_notification(report_data, report_id)
+        
+        return jsonify({
+            "success": True,
+            "message": "Reporte creado exitosamente",
+            "reportId": report_id,
+            "data": report_data
+        }), 201
+        
+    except Exception as e:
+        print(f"Error creando reporte: {e}")
+        return jsonify({"error": str(e)}), 500
+
+def get_valid_reasons(content_type, report_type):
+    """Obtener motivos válidos según tipo de contenido y reporte"""
+    if report_type == 'episode':
+        return ['broken_link', 'audio_issue', 'subtitles', 'wrong_episode', 'other']
+    
+    reasons_map = {
+        'pelicula': ['broken_link', 'audio_issue', 'subtitles', 'description', 'cover', 'other'],
+        'serie': ['broken_links', 'audio_issues', 'subtitles', 'description', 'cover', 'other'],
+        'canal': ['broken_link', 'audio_issue', 'video_quality', 'stream_down', 'other']
+    }
+    
+    return reasons_map.get(content_type, [])
+
+def send_report_notification(report_data, report_id):
+    """Enviar notificación por email sobre nuevo reporte"""
+    try:
+        admin_email = EMAIL_CONFIG.get('admin_email')
+        if not admin_email:
+            return
+        
+        content_type_map = {
+            'pelicula': 'Película',
+            'serie': 'Serie',
+            'canal': 'Canal'
+        }
+        
+        subject = f"📢 Nuevo Reporte - {content_type_map.get(report_data['contentType'])}"
+        
+        # Construir mensaje HTML
+        message = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+                <h2 style="color: #e74c3c;">Nuevo Reporte de Contenido</h2>
+                
+                <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 15px 0;">
+                    <h3 style="margin-top: 0;">📋 Información del Reporte</h3>
+                    <table style="width: 100%;">
+                        <tr>
+                            <td style="padding: 5px; font-weight: bold;">ID del Reporte:</td>
+                            <td style="padding: 5px;">{report_id}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 5px; font-weight: bold;">Contenido:</td>
+                            <td style="padding: 5px;">{report_data['contentTitle']}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 5px; font-weight: bold;">Tipo:</td>
+                            <td style="padding: 5px;">{content_type_map.get(report_data['contentType'])}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 5px; font-weight: bold;">Motivo:</td>
+                            <td style="padding: 5px;">{get_reason_display(report_data['reason'])}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 5px; font-weight: bold;">Tipo de Reporte:</td>
+                            <td style="padding: 5px;">{'Episodio' if report_data['reportType'] == 'episode' else 'General'}</td>
+                        </tr>
+                    </table>
+                </div>
+                
+                {f"<div style='background-color: #fff3cd; padding: 15px; border-radius: 5px; margin: 15px 0;'><strong>Comentario:</strong><br>{report_data.get('comment', 'Sin comentario')}</div>" if report_data.get('comment') else ""}
+                
+                {f"<div style='background-color: #d1ecf1; padding: 15px; border-radius: 5px; margin: 15px 0;'><strong>Email de contacto:</strong> {report_data.get('userEmail', 'No proporcionado')}</div>" if report_data.get('userEmail') else ""}
+                
+                {f"<div style='background-color: #e2e3e5; padding: 15px; border-radius: 5px; margin: 15px 0;'><strong>Información de Episodio:</strong><br>Temporada: {report_data.get('season')}<br>Episodio: {report_data.get('episode')}</div>" if report_data.get('reportType') == 'episode' else ""}
+                
+                <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
+                    <p style="color: #666; font-size: 14px;">
+                        Este es un reporte automático del sistema.<br>
+                        Revisa el panel de administración para más detalles.
+                    </p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        send_email_async(admin_email, subject, message)
+        print(f"✅ Notificación de reporte enviada a {admin_email}")
+        
+    except Exception as e:
+        print(f"❌ Error enviando notificación de reporte: {e}")
+
+def get_reason_display(reason):
+    """Obtener texto descriptivo para el motivo del reporte"""
+    reason_map = {
+        'broken_link': 'Enlace roto',
+        'broken_links': 'Enlaces rotos',
+        'audio_issue': 'Problema de audio',
+        'audio_issues': 'Problemas de audio',
+        'subtitles': 'Subtítulos incorrectos',
+        'description': 'Descripción incorrecta',
+        'cover': 'Portada incorrecta',
+        'video_quality': 'Calidad de video baja',
+        'stream_down': 'Stream no funciona',
+        'wrong_episode': 'Episodio incorrecto',
+        'other': 'Otro problema'
+    }
+    return reason_map.get(reason, reason)
+
+@app.route('/api/reports', methods=['GET'])
+@token_required
+def get_reports(user_data):
+    """Obtener reportes (solo administradores)"""
+    if not user_data.get('is_admin'):
+        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+    
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    try:
+        # Parámetros de filtro
+        status = request.args.get('status', '')
+        content_type = request.args.get('content_type', '')
+        page = int(request.args.get('page', 1))
+        limit = int(request.args.get('limit', 20))
+        
+        # Validar parámetros
+        if page < 1:
+            page = 1
+        if limit < 1 or limit > 100:
+            limit = 20
+        
+        offset = (page - 1) * limit
+        
+        # Construir consulta
+        reports_ref = db.collection('reports')
+        
+        # Aplicar filtros
+        if status:
+            reports_ref = reports_ref.where('status', '==', status)
+        if content_type:
+            reports_ref = reports_ref.where('contentType', '==', content_type)
+        
+        # Ordenar por fecha más reciente
+        reports_ref = reports_ref.order_by('timestamp', direction=firestore.Query.DESCENDING)
+        
+        # Aplicar paginación
+        reports_ref = reports_ref.limit(limit).offset(offset)
+        
+        # Ejecutar consulta
+        docs = reports_ref.stream()
+        
+        reports = []
+        for doc in docs:
+            report_data = doc.to_dict()
+            report_data['id'] = doc.id
+            
+            # Convertir timestamp si es necesario
+            if hasattr(report_data.get('timestamp'), 'timestamp'):
+                report_data['timestamp'] = report_data['timestamp'].timestamp()
+            
+            reports.append(report_data)
+        
+        # Obtener total para paginación (sin filtros para contar total)
+        total_ref = db.collection('reports')
+        if status:
+            total_ref = total_ref.where('status', '==', status)
+        if content_type:
+            total_ref = total_ref.where('contentType', '==', content_type)
+        
+        total_docs = len(list(total_ref.stream()))
+        
+        # Estadísticas
+        stats = {
+            'pending': len(list(db.collection('reports').where('status', '==', 'pending').stream())),
+            'reviewed': len(list(db.collection('reports').where('status', '==', 'reviewed').stream())),
+            'resolved': len(list(db.collection('reports').where('status', '==', 'resolved').stream())),
+            'total': len(list(db.collection('reports').stream()))
+        }
+        
+        return jsonify({
+            "success": True,
+            "data": reports,
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total_docs,
+                "pages": (total_docs + limit - 1) // limit
+            },
+            "statistics": stats,
+            "filters": {
+                "status": status,
+                "content_type": content_type
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error obteniendo reportes: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/reports/<report_id>', methods=['PUT'])
+@token_required
+def update_report(user_data, report_id):
+    """Actualizar reporte (solo administradores)"""
+    if not user_data.get('is_admin'):
+        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+    
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Datos JSON requeridos"}), 400
+        
+        # Verificar que el reporte existe
+        report_ref = db.collection('reports').document(report_id)
+        report_doc = report_ref.get()
+        if not report_doc.exists:
+            return jsonify({"error": "Reporte no encontrado"}), 404
+        
+        # Campos permitidos para actualización
+        allowed_fields = ['status', 'adminNotes']
+        update_data = {}
+        
+        for field in allowed_fields:
+            if field in data:
+                update_data[field] = data[field]
+        
+        # Agregar información de resolución si el estado cambia a 'resolved'
+        if 'status' in update_data and update_data['status'] == 'resolved':
+            update_data['resolvedAt'] = firestore.SERVER_TIMESTAMP
+            update_data['resolvedBy'] = user_data.get('username', 'admin')
+        
+        # Actualizar reporte
+        report_ref.update(update_data)
+        
+        return jsonify({
+            "success": True,
+            "message": "Reporte actualizado exitosamente",
+            "updated_fields": update_data
+        })
+        
+    except Exception as e:
+        print(f"Error actualizando reporte: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/reports/statistics', methods=['GET'])
+@token_required
+def get_reports_statistics(user_data):
+    """Obtener estadísticas de reportes (solo administradores)"""
+    if not user_data.get('is_admin'):
+        return jsonify({"error": "Se requieren privilegios de administrador"}), 403
+    
+    firebase_check = check_firebase()
+    if firebase_check:
+        return firebase_check
+    
+    try:
+        # Estadísticas por estado
+        status_stats = {
+            'pending': len(list(db.collection('reports').where('status', '==', 'pending').stream())),
+            'reviewed': len(list(db.collection('reports').where('status', '==', 'reviewed').stream())),
+            'resolved': len(list(db.collection('reports').where('status', '==', 'resolved').stream()))
+        }
+        
+        # Estadísticas por tipo de contenido
+        content_stats = {
+            'pelicula': len(list(db.collection('reports').where('contentType', '==', 'pelicula').stream())),
+            'serie': len(list(db.collection('reports').where('contentType', '==', 'serie').stream())),
+            'canal': len(list(db.collection('reports').where('contentType', '==', 'canal').stream()))
+        }
+        
+        # Estadísticas por motivo
+        reasons = ['broken_link', 'audio_issue', 'subtitles', 'description', 'cover', 'video_quality', 'stream_down', 'wrong_episode', 'other']
+        reason_stats = {}
+        
+        for reason in reasons:
+            count = len(list(db.collection('reports').where('reason', '==', reason).stream()))
+            if count > 0:
+                reason_stats[reason] = count
+        
+        # Reportes de los últimos 7 días
+        week_ago = time.time() - (7 * 24 * 60 * 60)
+        recent_reports = list(db.collection('reports')
+                            .where('timestamp', '>=', firestore.SERVER_TIMESTAMP)
+                            .stream())
+        
+        return jsonify({
+            "success": True,
+            "statistics": {
+                "total": sum(status_stats.values()),
+                "by_status": status_stats,
+                "by_content_type": content_stats,
+                "by_reason": reason_stats,
+                "recent_7_days": len(recent_reports)
+            },
+            "timestamp": time.time()
+        })
+        
+    except Exception as e:
+        print(f"Error obteniendo estadísticas de reportes: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# =============================================
 # ENDPOINTS EXISTENTES PARA USUARIOS NORMALES (ACTUALIZADOS CON CONTROL DE COLECCIONES)
 # =============================================
 
